@@ -3,6 +3,7 @@
 
 #include <linux/mutex.h>
 #include <linux/types.h>
+#include <asm-generic/div64.h>
 
 /* Hours offset for GM and China-BeiJing */
 #define WCN_BTWF_TIME_OFFSET (8)
@@ -16,7 +17,10 @@
  * 32bit ms is more than 42days, it's engough
  * for loopcheck debug.
  */
-#define MARLIN_64B_NS_TO_32B_MS(ns) ((unsigned int)(ns / 1000000))
+#define NS_TO_MS                     1000000
+#define MARLIN_64B_NS_TO_32B_MS(ns)  do_div(ns, NS_TO_MS)
+
+//#define MARLIN_64B_NS_TO_32B_MS(ns) ((unsigned int)(ns / NS_TO_MS))
 
 enum atcmd_owner {
 	/* default AT CMD reply to WCND */
@@ -44,18 +48,18 @@ struct atcmd_fifo {
 };
 
 struct wcn_tm {
-	int tm_msec;    /* mili seconds */
-	int tm_sec;     /* seconds */
-	int tm_min;     /* minutes */
-	int tm_hour;    /* hours */
-	int tm_mday;    /* day of the month */
-	int tm_mon;     /* month */
-	int tm_year;    /* year */
+	long tm_msec;    /* mili seconds */
+	long tm_sec;     /* seconds */
+	long tm_min;     /* minutes */
+	long tm_hour;    /* hours */
+	long tm_mday;    /* day of the month */
+	long tm_mon;     /* month */
+	long tm_year;    /* year */
 };
 
 void mdbg_atcmd_owner_init(void);
 void mdbg_atcmd_owner_deinit(void);
-long int mdbg_send_atcmd(char *buf, long int len, enum atcmd_owner owner);
+long int mdbg_send_atcmd(char *buf, size_t len, enum atcmd_owner owner);
 enum atcmd_owner mdbg_atcmd_owner_peek(void);
 void mdbg_atcmd_clean(void);
 /* AP notify BTWF time by at+aptime=... cmd */
@@ -68,5 +72,6 @@ long int wcn_ap_notify_btwf_time(void);
  * should call this function also.
  */
 void marlin_bootup_time_update(void);
-unsigned long int marlin_bootup_time_get(void);
+unsigned long long marlin_bootup_time_get(void);
+char *wcn_get_kernel_time(void);
 #endif

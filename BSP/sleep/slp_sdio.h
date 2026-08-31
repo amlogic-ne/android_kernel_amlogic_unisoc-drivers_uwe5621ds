@@ -1,6 +1,6 @@
 #ifndef __SLP_SDIO_H__
 #define __SLP_SDIO_H__
-//#include <linux/wakelock.h>
+
 #include "sdio_int.h"
 #include "wcn_glb.h"
 
@@ -18,6 +18,6 @@ int ap_wakeup_cp(void)
 	return sprdwcn_bus_aon_writeb(REG_CP_SLP_CTL, 0);
 }
 int slp_allow_sleep(void);
-int slp_pub_int_RegCb(void);
+int slp_pub_int_regcb(void);
 
 #endif

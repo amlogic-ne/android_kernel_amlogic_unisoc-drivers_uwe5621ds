@@ -18,6 +18,6 @@
 #ifndef _WCN_PARN_PARSER
 #define _WCN_PARN_PARSER
 
-int parse_firmware_path(char *firmware_path);
+int parse_firmware_path(char *FIRMWARE_PATH);
 
 #endif

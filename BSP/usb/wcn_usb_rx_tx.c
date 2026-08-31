@@ -7,11 +7,15 @@
 #include <linux/skbuff.h>
 #include <linux/list.h>
 #include <linux/atomic.h>
+#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,0)
+#include <uapi/linux/sched/types.h>
+#endif
 
 #define TRANSF_UNITS 16
 #define TRANSF_TOTAL 10
 
-#define WCN_USB_MEMCOPY 64
+#define WCN_USB_MEMCOPY 128
 #define WIFIDATA_OUT_ALIGNMENT 1600
 #define WIFIDATA_IN_ALIGNMENT 1620
 
@@ -19,6 +23,7 @@
 #define WCN_USB_BT_CTRL_TYPE 0x21
 /* 10 HZ */
 #define WCN_USB_TIMEOUT (10 * HZ)
+#define WCN_USB_LOG_CHN_NUM 24
 char dirty_buff[TRANSF_ALIGNMENT_MAX];
 
 struct rx_tx_pool {
@@ -178,7 +183,7 @@ void wcn_usb_rx_tx_pool_free(struct wcn_usb_rx_tx *rx_tx)
 	spin_unlock_bh(&rx_tx_pool.lock);
 }
 
-static inline int wcn_usb_channel_is_rx(int channel)
+inline int wcn_usb_channel_is_rx(int channel)
 {
 	return channel >= 16;
 }
@@ -247,9 +252,33 @@ struct wcn_usb_copy_kthread {
 	struct list_head	rx_tx_head;
 	struct mbuf_t		*tx_mbuf_head;
 	struct mbuf_t		*tx_mbuf_tail;
+	bool			exit_flag; // for remove copy thread
 } copy_work[2];
 
+struct wcn_usb_poll_kthread {
+	// struct task_struct	*wcn_poll_thread;
+	struct  work_struct	wcn_poll_work;
+	struct  tasklet_struct	wcn_poll_tasklet;
+	// struct completion	callback_complete;
+	spinlock_t		lock;
+	int			report_num[8];
+	int			report_num_last[8];
+	int			transfer_remains[8];
+	int			nomem_remains[8];
+	int			nomem_try_times[8];
+	struct wcn_usb_rx_apostle *apostle;
+} poll_work;
 
+#ifdef CONFIG_WCN_USB_ALL_IN_ONE_TASKLET
+struct wcn_usb_rx_tasklet {
+	struct tasklet_struct wcn_usb_rx_tx_tasklet;
+	spinlock_t		lock;
+	struct list_head	rx_tx_head;
+} rx_tx_tasklet;
+#endif
+
+static void wcn_usb_put_big_men(void *buf, int chn);
+#ifdef CONFIG_WCN_USB_USE_THREAD
 static void wcn_usb_callback(struct wcn_usb_packet *packet)
 {
 	struct wcn_usb_rx_tx *rx_tx;
@@ -293,7 +322,50 @@ static void wcn_usb_callback(struct wcn_usb_packet *packet)
 	ret = schedule_work(&work_data->wcn_usb_work);
 #endif
 }
+#else
+static void wcn_usb_callback(struct wcn_usb_packet *packet)
+{
+	struct wcn_usb_rx_tx *rx_tx;
+	struct list_head *rx_tx_head;
+	spinlock_t *list_lock;
+	
+	struct wcn_usb_work_data *work_data;
 
+
+	rx_tx = wcn_usb_packet_get_pdata(packet);
+	channel_debug_rx_tx_from_controller(rx_tx->channel, 1);
+
+	rx_tx->packet_status = wcn_usb_packet_get_status(packet);
+
+	work_data = wcn_usb_store_get_channel_info(rx_tx->channel);
+	
+#ifdef CONFIG_WCN_USB_ALL_IN_ONE_TASKLET
+	rx_tx_head = &rx_tx_tasklet.rx_tx_head;
+	list_lock = &rx_tx_tasklet.lock;
+#else
+	rx_tx_head = &work_data->rx_tx_head;
+	list_lock = &work_data->lock;
+#endif
+
+	spin_lock_irq(list_lock);
+	list_add_tail(&rx_tx->list, rx_tx_head);
+	spin_unlock_irq(list_lock);
+
+	if (rx_tx->channel != WCN_USB_LOG_CHN_NUM) {
+#ifdef CONFIG_WCN_USB_ALL_IN_ONE_TASKLET
+		tasklet_schedule(&rx_tx_tasklet.wcn_usb_rx_tx_tasklet);
+#else
+		tasklet_schedule(&work_data->wcn_usb_rx_tx_tasklet);
+#endif
+	} else {
+		schedule_work(&work_data->wcn_usb_rx_tx_work);
+	}
+	
+#if 0
+	ret = schedule_work(&work_data->wcn_usb_work);
+#endif
+}
+#endif
 static struct scatterlist *wcn_usb_mbuf2sgs(struct mbuf_t *head,
 		struct mbuf_t *tail, int num, int align,
 		unsigned int *total_len, int *sgs_num)
@@ -397,8 +469,13 @@ static void wcn_usb_deal_partial_fail(int chn, struct mbuf_t *head,
 {
 	struct mchn_ops_t *mchn_ops;
 	int ret;
+	struct wcn_usb_work_data *work_data;
 
-	mutex_lock(&wcn_usb_store_get_channel_info(chn)->channel_lock);
+	work_data = wcn_usb_store_get_channel_info(chn);
+	if (!work_data)
+		return;
+
+	mutex_lock(&work_data->channel_lock);
 	mchn_ops = chn_ops(chn);
 	if (!wcn_usb_channel_is_rx(chn) && mchn_ops && mchn_ops->pop_link) {
 		channel_debug_mbuf_to_user(chn, num);
@@ -411,7 +488,7 @@ static void wcn_usb_deal_partial_fail(int chn, struct mbuf_t *head,
 			wcn_usb_err("%s %d pop_link mis\n", __func__, __LINE__);
 		wcn_usb_mbuf_list_destroy(chn, head, tail, num);
 	}
-	mutex_unlock(&wcn_usb_store_get_channel_info(chn)->channel_lock);
+	mutex_unlock(&work_data->channel_lock);
 }
 
 /**
@@ -596,7 +673,7 @@ static void wcn_usb_put_big_men(void *buf, int chn)
 	spin_unlock_irq(&big_men_head.list_lock);
 	channel_debug_free_big_men(chn);
 }
-
+#ifdef CONFIG_WCN_USB_USE_THREAD
 static int rx_copy_work_func(void *work)
 {
 	struct wcn_usb_copy_kthread *copy_kthread;
@@ -611,14 +688,20 @@ static int rx_copy_work_func(void *work)
 	do {
 		struct sched_param param;
 
-		param.sched_priority = -20;
-		sched_setscheduler(current, SCHED_FIFO, &param);
+		param.sched_priority = 1;
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
+	    sched_setscheduler(current, SCHED_RR, &param);
+#else
+	    sched_set_fifo_low(current);
+#endif /* (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)) */
 	} while (0);
 
 	copy_kthread = (struct wcn_usb_copy_kthread *)work;
 
 
 GET_RX_TX_HEAD:
+	if(copy_kthread->exit_flag)
+		return 0;
 	reinit_completion(&copy_kthread->callback_complete);
 	INIT_LIST_HEAD(&rx_tx_head);
 
@@ -653,12 +736,12 @@ GET_RX_TX_HEAD:
 		}
 	}
 
-	wait_for_completion(&copy_kthread->callback_complete);
+	wait_for_completion_interruptible(&copy_kthread->callback_complete);
 	goto GET_RX_TX_HEAD;
 
 	return 0;
 }
-
+#endif
 static int wcn_usb_sent_mbuf_copy(int chn, struct mbuf_t *head,
 		struct mbuf_t *tail, int num)
 {
@@ -705,15 +788,18 @@ static int tx_copy_work_func(void *work)
 
 
 	do {
-		struct sched_param param;
+		// struct sched_param param;
 
-		param.sched_priority = -20;
-		sched_setscheduler(current, SCHED_FIFO, &param);
+		// param.sched_priority = -20;
+		// sched_setscheduler(current, SCHED_FIFO, &param);
+		set_user_nice(current, -20);
 	} while (0);
 
 	copy_kthread = (struct wcn_usb_copy_kthread *)work;
 
 GET_NEXT_MBUF:
+	if(copy_kthread->exit_flag)
+		return 0;
 	reinit_completion(&copy_kthread->callback_complete);
 	spin_lock(&copy_kthread->lock);
 	mbuf = wcn_usb_mbuf_stack_pop(&copy_kthread->tx_mbuf_head);
@@ -732,7 +818,7 @@ GET_NEXT_MBUF:
 			buf = NULL;
 			buf_size = 0;
 		}
-		wait_for_completion(&copy_kthread->callback_complete);
+		wait_for_completion_interruptible(&copy_kthread->callback_complete);
 		goto GET_NEXT_MBUF;
 	}
 
@@ -825,6 +911,7 @@ static int wcn_usb_copy_submit_rx_tx(struct wcn_usb_rx_tx *rx_tx, void *buf,
 void wcn_usb_init_copy_men(void)
 {
 	int i;
+	int int_copy_thread_num;
 
 	INIT_LIST_HEAD(&big_men_head.big_men_head);
 	spin_lock_init(&big_men_head.list_lock);
@@ -838,14 +925,28 @@ void wcn_usb_init_copy_men(void)
 
 	copy_work[0].wcn_usb_thread = kthread_create(tx_copy_work_func,
 			&copy_work[0], "wcn_usb_thread_tx");
+#ifdef CONFIG_WCN_USB_USE_THREAD
 	copy_work[1].wcn_usb_thread = kthread_create(rx_copy_work_func,
 			&copy_work[1], "wcn_copy_rx");
-	for (i = 0; i < 2; i++) {
+	int_copy_thread_num = 2;
+#else	
+	int_copy_thread_num = 1;
+#endif	
+	for (i = 0; i < int_copy_thread_num; i++) {
 		spin_lock_init(&copy_work[i].lock);
 		init_completion(&copy_work[i].callback_complete);
 		INIT_LIST_HEAD(&copy_work[i].rx_tx_head);
 		if (copy_work[i].wcn_usb_thread)
 			wake_up_process(copy_work[i].wcn_usb_thread);
+	}
+}
+
+void wcn_usb_deinit_copy_men(void)
+{
+	struct wcn_usb_big_men *big_men, *n;
+
+	list_for_each_entry_safe(big_men, n, &big_men_head.big_men_head, list) {
+		wcn_usb_kfree(big_men);
 	}
 }
 
@@ -881,11 +982,19 @@ static int wcn_usb_poll_copy_one(int chn)
 
 	mbuf_list_iter(rx_tx->head, rx_tx->num, mbuf, i) {
 		mbuf->len = alignment_comm(chn) + alignment_protocol_stack(chn);
+#ifdef CONFIG_WCN_USB_USE_THREAD
 		mbuf->buf = wcn_usb_alloc_buf(mbuf->len, GFP_KERNEL);
 		if (!mbuf->buf) {
 			ret = -ENOMEM;
 			goto FREE_MBUF;
 		}
+#else
+		if (i == 0)
+			mbuf->is_need_release = 1;
+		else
+			mbuf->is_need_release = 0;
+
+#endif		
 	}
 
 	ret = wcn_usb_packet_bind(rx_tx->packet, ep, GFP_KERNEL);
@@ -942,6 +1051,10 @@ inline int wcn_usb_push_list_tx(int chn, struct mbuf_t *head,
 		struct mbuf_t *tail, int num)
 {
 	struct wcn_usb_ep *ep;
+	/* In some platform, wifi/bt send mbuf before usb io resume, we should wait resume*/
+	do {
+		mdelay(20);
+	}while (wcn_usb_get_suspend_resume_flag());
 
 	wcn_usb_print_mbuf(chn, head, num, __func__);
 
@@ -994,18 +1107,83 @@ static int wcn_usb_mbuf_list_destroy(int chn, struct mbuf_t *head,
 	int i;
 
 	mbuf_list_iter(head, num, mbuf, i) {
-		wcn_usb_free_buf(mbuf->buf);
-		mbuf->buf = NULL;
-		mbuf->len = 0;
+#ifndef CONFIG_WCN_USB_USE_THREAD
+		if (wcn_usb_channel_is_copy(chn) && wcn_usb_channel_is_rx(chn)) {
+			mbuf->buf = NULL;
+			mbuf->len = 0;
+			mbuf->is_need_release = 0;
+		} else {
+#endif
+			if (mbuf->buf != NULL)
+				wcn_usb_free_buf(mbuf->buf);
+			mbuf->buf = NULL;
+			mbuf->len = 0;
+#ifndef CONFIG_WCN_USB_USE_THREAD
+		}
+#endif
 	}
 	return wcn_usb_list_free(chn, head, tail, num);
 }
+#ifndef CONFIG_WCN_USB_USE_THREAD
+static int wcn_usb_rx_put_big_men(int chn, struct mbuf_t *head,
+		struct mbuf_t *tail, int num)
+{
+	struct mbuf_t *mbuf;
+	int i;
+
+	mbuf_list_iter(head, num, mbuf, i) {
+		if (wcn_usb_channel_is_copy(chn)) {
+			if (mbuf->is_need_release == 1 && mbuf->buf != NULL)
+				wcn_usb_put_big_men(mbuf->buf, chn);
+		}
+	}
+
+	return 0;
+}
+#endif
 
 inline int wcn_usb_push_list_rx(int chn, struct mbuf_t *head,
 		struct mbuf_t *tail, int num)
 {
 	wcn_usb_print_mbuf(chn, head, num, __func__);
+#ifndef CONFIG_WCN_USB_USE_THREAD
+	if (wcn_usb_channel_is_copy(chn))
+		wcn_usb_rx_put_big_men(chn, head, tail, num);
+#endif
 	return wcn_usb_mbuf_list_destroy(chn, head, tail, num);
+}
+
+inline int wcn_usb_mbuf_alloc_rx(int chn, struct mbuf_t *head,
+		struct mbuf_t *tail, int num)
+{
+	int i = 0;
+	struct mbuf_t *mbuf;
+
+	if( wcn_usb_channel_is_rx(chn) && wcn_usb_channel_is_copy(chn))
+		return 0;
+	
+	mbuf_list_iter(head, num, mbuf, i) {
+		mbuf->len = alignment_comm(chn) + alignment_protocol_stack(chn);
+		mbuf->buf = wcn_usb_alloc_buf(mbuf->len, GFP_KERNEL);
+		if (!mbuf->buf) {
+			wcn_usb_err("%s chn[%d] alloc rx mbuf failed i = %d\n", __func__, chn, i);
+		}
+	}
+	return 0;
+}
+
+inline int wcn_usb_mbuf_release_rx(int chn, struct mbuf_t *head,
+		struct mbuf_t *tail, int num)
+{
+	
+	// int err;
+	if( wcn_usb_channel_is_rx(chn) && wcn_usb_channel_is_copy(chn))
+		return 0;
+
+	if(head->buf)
+		wcn_usb_free_buf(head->buf);
+	
+	return 0;
 }
 
 static int wcn_usb_poll_sg(int chn, int urbs)
@@ -1305,7 +1483,7 @@ OUT:
 
 	return ret;
 }
-
+#ifdef CONFIG_WCN_USB_USE_THREAD
 static void wcn_usb_rx_tx_list_parse(struct list_head *rx_tx_head,
 		int *rx_tx_num, int *rx_tx_resent,
 		struct mbuf_t **head, struct mbuf_t **tail, int *num)
@@ -1350,6 +1528,7 @@ static void wcn_usb_rx_tx_list_parse(struct list_head *rx_tx_head,
 		}
 	}
 }
+#endif
 
 static void wcn_usb_work_rx_tx_free(struct list_head *rx_tx_head)
 {
@@ -1369,12 +1548,8 @@ unsigned long long wcn_usb_get_rx_tx_cnt(void)
 	return wcn_usb_rx_tx_cnt;
 }
 
-#if (defined(CONFIG_WCN_USB) && defined(CONFIG_MTK_BOARD))
-extern void marlin_power_lock(void);
-extern void marlin_power_unlock(void);
-extern bool marlin_get_download_status(void);
-#endif
 static void wcn_usb_rx_trash(int chn, int num);
+#ifdef CONFIG_WCN_USB_USE_THREAD
 int wcn_usb_work_func(void *work)
 {
 	struct wcn_usb_work_data *work_data;
@@ -1389,16 +1564,20 @@ int wcn_usb_work_func(void *work)
 #endif
 	work_data = (struct wcn_usb_work_data *)work;
 
-#if 0
 	do {
 		struct sched_param param;
 
 		param.sched_priority = 1;
-		sched_setscheduler(current, SCHED_FIFO, &param);
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0))
+	    sched_setscheduler(current, SCHED_RR, &param);
+#else
+	    sched_set_fifo_low(current);
+#endif /* (LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)) */
 	} while (0);
-#endif
 
 GET_RX_TX_HEAD:
+	if(work_data->exit_flag)
+		return 0;
 	reinit_completion(&work_data->callback_complete);
 	INIT_LIST_HEAD(&rx_tx_head);
 
@@ -1467,30 +1646,293 @@ RX_TX_LIST_HANDLE:
 				work_data->transfer_remains = ret;
 			}
 		} else {
-#if (defined(CONFIG_WCN_USB) && defined(CONFIG_MTK_BOARD))
-			marlin_power_lock();
-			if (marlin_get_download_status())
-#endif
-			{
-				wcn_usb_rx_trash(work_data->channel,
-					 work_data->transfer_remains);
-			}
-#if (defined(CONFIG_WCN_USB) && defined(CONFIG_MTK_BOARD))
-			marlin_power_unlock();
-#endif
+			wcn_usb_rx_trash(work_data->channel,
+					work_data->transfer_remains);
 			work_data->transfer_remains = 0;
 		}
 	}
 
 	wake_up(&work_data->work_completion);
 	if (!work_data->transfer_remains)
-		wait_for_completion(&work_data->callback_complete);
+		wait_for_completion_interruptible(&work_data->callback_complete);
 	else
 		msleep(100);
 	goto GET_RX_TX_HEAD;
 
 	return 0;
 }
+#else
+void wcn_usb_work_func(struct wcn_usb_work_data *work_data)
+{
+	struct list_head rx_tx_head;
+	struct mchn_ops_t *mchn_ops;
+	int ret;
+	struct wcn_usb_rx_tx *rx_tx, *n;
+	struct mbuf_t *temp_head, *temp_tail;
+	int temp_num;
+	int recv_len, total_len;
+	struct mbuf_t *mbuf;
+	int i = 0;
+	void *buf;
+
+
+	INIT_LIST_HEAD(&rx_tx_head);
+
+	spin_lock_irq(&work_data->lock);
+	list_splice_init(&work_data->rx_tx_head, &rx_tx_head);
+	
+	spin_unlock_irq(&work_data->lock);
+
+	list_for_each_entry_safe(rx_tx, n, &rx_tx_head, list) {
+		if (wcn_usb_channel_is_copy(rx_tx->channel) &&
+			wcn_usb_channel_is_rx(rx_tx->channel)) {
+			total_len = recv_len = wcn_usb_packet_recv_len(rx_tx->packet);
+			buf = wcn_usb_packet_pop_buf(rx_tx->packet);
+			if (!rx_tx->packet_status) {
+				mbuf_list_iter(rx_tx->head, rx_tx->num, mbuf, i) {
+					if (recv_len <= 0)
+						break;
+					mbuf->buf = buf + (total_len - recv_len);
+					recv_len -= alignment_comm(rx_tx->channel);
+				}
+			}
+		}
+
+		ret = wcn_usb_rx_tx_parse(rx_tx, &temp_head,
+					  &temp_tail, &temp_num);
+		if(temp_head != NULL) {
+			if (rx_tx->channel == WCN_USB_LOG_CHN_NUM)
+				mutex_lock(&work_data->channel_lock);
+
+			mchn_ops = chn_ops(rx_tx->channel);
+			if (mchn_ops && mchn_ops->pop_link) {
+				wcn_usb_print_mbuf(rx_tx->channel, temp_head, temp_num, __func__);
+				channel_debug_mbuf_to_user(rx_tx->channel, temp_num);
+				ret = mchn_ops->pop_link(rx_tx->channel, temp_head, temp_tail, temp_num);
+				if (ret)
+					wcn_usb_err("%s channel[%d] pop_link error[%d]\n",
+							__func__, rx_tx->channel, ret);
+			} else {
+				wcn_usb_err("%s channel[%d] pop_link miss\n",
+						__func__, rx_tx->channel);
+				ret = wcn_usb_mbuf_list_destroy(rx_tx->channel, temp_head,
+						temp_tail, temp_num);
+				if (ret)
+					wcn_usb_err("%s channel[%d] list_destroy error[%d]\n",
+							__func__, rx_tx->channel, ret);
+			}
+			if (rx_tx->channel == WCN_USB_LOG_CHN_NUM)
+				mutex_unlock(&work_data->channel_lock);
+
+			if (wcn_usb_channel_is_rx(rx_tx->channel))
+				wcn_usb_rx_tx_cnt += temp_num;
+		}
+	}
+
+	wcn_usb_work_rx_tx_free(&rx_tx_head);
+}
+
+static void wcn_usb_rx_tx_func(struct work_struct *work)
+{
+	struct wcn_usb_work_data *work_data;
+	work_data = container_of(work, struct wcn_usb_work_data, wcn_usb_rx_tx_work);
+	wcn_usb_work_func(work_data);
+}
+#ifdef CONFIG_WCN_USB_ALL_IN_ONE_TASKLET
+static void rx_tx_tasklet_func(unsigned long data)
+{
+	struct list_head rx_tx_head;
+	struct mchn_ops_t *mchn_ops;
+	int ret;
+	struct wcn_usb_rx_tx *rx_tx, *n;
+	struct mbuf_t *temp_head, *temp_tail;
+	int temp_num;
+	int recv_len, total_len;
+	struct mbuf_t *mbuf;
+	int i = 0;
+	void *buf;
+
+	struct wcn_usb_rx_tasklet *work_data;
+
+	work_data = &rx_tx_tasklet;
+
+	INIT_LIST_HEAD(&rx_tx_head);
+
+	spin_lock_irq(&work_data->lock);
+	list_splice_init(&work_data->rx_tx_head, &rx_tx_head);
+	
+	spin_unlock_irq(&work_data->lock);
+
+	list_for_each_entry_safe(rx_tx, n, &rx_tx_head, list) {
+		if (wcn_usb_channel_is_copy(rx_tx->channel) &&
+			wcn_usb_channel_is_rx(rx_tx->channel)) {
+			total_len = recv_len = wcn_usb_packet_recv_len(rx_tx->packet);
+			buf = wcn_usb_packet_pop_buf(rx_tx->packet);
+			if (!rx_tx->packet_status) {
+				mbuf_list_iter(rx_tx->head, rx_tx->num, mbuf, i) {
+					if (recv_len <= 0)
+						break;
+					mbuf->buf = buf + (total_len - recv_len);
+					recv_len -= alignment_comm(rx_tx->channel);
+				}
+			}
+		}
+
+		ret = wcn_usb_rx_tx_parse(rx_tx, &temp_head,
+					  &temp_tail, &temp_num);
+		if(temp_head != NULL) {
+			mchn_ops = chn_ops(rx_tx->channel);
+			if (mchn_ops && mchn_ops->pop_link) {
+				wcn_usb_print_mbuf(rx_tx->channel, temp_head, temp_num, __func__);
+				channel_debug_mbuf_to_user(rx_tx->channel, temp_num);
+				ret = mchn_ops->pop_link(rx_tx->channel, temp_head, temp_tail, temp_num);
+				if (ret)
+					wcn_usb_err("%s channel[%d] pop_link error[%d]\n",
+							__func__, rx_tx->channel, ret);
+			} else {
+				wcn_usb_err("%s channel[%d] pop_link miss\n",
+						__func__, rx_tx->channel);
+				ret = wcn_usb_mbuf_list_destroy(rx_tx->channel, temp_head,
+						temp_tail, temp_num);
+				if (ret)
+					wcn_usb_err("%s channel[%d] list_destroy error[%d]\n",
+							__func__, rx_tx->channel, ret);
+			}
+
+			if (wcn_usb_channel_is_rx(rx_tx->channel))
+				wcn_usb_rx_tx_cnt += temp_num;
+		}
+	}
+
+	wcn_usb_work_rx_tx_free(&rx_tx_head);
+}
+
+
+#else
+static void wcn_usb_rx_tx_tasklet_func(unsigned long data) 
+{
+	struct wcn_usb_work_data *work_data;
+
+	work_data = (struct wcn_usb_work_data *)data;
+
+	wcn_usb_work_func(work_data);
+}
+#endif//CONFIG_WCN_USB_ALL_IN_ONE_TASKLET
+#endif//CONFIG_WCN_USB_USE_THREAD
+static void wcn_usb_rx_apostle_callback(struct wcn_usb_packet *packet);
+static void wcn_usb_rx_apostle_free(struct wcn_usb_rx_apostle *apostle);
+
+#ifndef CONFIG_WCN_USB_USE_THREAD
+#ifdef CONFIG_WCN_USB_CH25_USE_WORKQUEUE
+static void wcn_usb_poll_func(struct work_struct *work)
+#else
+static void wcn_usb_poll_func(unsigned long data)
+#endif
+{
+	struct wcn_usb_poll_kthread *poll_kthread;
+	int i;
+	int ret;
+
+
+	poll_kthread = &poll_work;
+// POLL_START:
+	// reinit_completion(&poll_kthread->callback_complete);
+
+	spin_lock_irq(&poll_kthread->lock);
+
+	for (i = 0; i < ARRAY_SIZE(report_num_map_chn) - 1; i++) {
+		if (poll_kthread->report_num[i] >= poll_kthread->report_num_last[i])
+			poll_kthread->transfer_remains[i] += poll_kthread->report_num[i] -
+							poll_kthread->report_num_last[i];
+		else
+			poll_kthread->transfer_remains[i] +=
+				USHRT_MAX - poll_kthread->report_num_last[i] +
+				poll_kthread->report_num[i] + 1;
+		poll_kthread->report_num_last[i] = poll_kthread->report_num[i];
+		poll_kthread->nomem_try_times[i] = 0;
+	}
+	spin_unlock_irq(&poll_kthread->lock);
+POLL_RX:
+	for (i = 0; i < ARRAY_SIZE(report_num_map_chn) - 1; i++) {
+		if (poll_kthread->transfer_remains[i]) {
+			if (chn_ops(report_num_map_chn[i])) {
+				ret = wcn_usb_poll_rx(report_num_map_chn[i],
+						poll_kthread->transfer_remains[i]);
+				if (ret < 0) {
+					//wcn_usb_err("%s chn[%d] poll rx error[%d]\n",
+					//	__func__, work_data->channel, ret);
+					/*
+					* if ret == -ENOMEN then we can wait it,
+					* if ret != -ENOMEN that mean that is a
+					* serous error, then we drop all info
+					*/
+					if (ret != -ENOMEM)
+						poll_kthread->transfer_remains[i] = 0;
+
+					if (ret == -ENOMEM)
+						poll_kthread->nomem_remains[i] = 1;
+					else 
+						poll_kthread->nomem_remains[i] = 0;
+
+				} else {
+					channel_debug_to_accept(report_num_map_chn[i],
+						poll_kthread->transfer_remains[i] - ret);
+					poll_kthread->transfer_remains[i] = ret;
+					
+				}
+			} else {
+				wcn_usb_rx_trash(report_num_map_chn[i],
+						poll_kthread->transfer_remains[i]);
+				poll_kthread->transfer_remains[i] = 0;
+			}
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(report_num_map_chn) - 1; i++) {
+		// wcn_usb_info("%s transfer_remains = %d i = %d\n",__func__,poll_kthread->transfer_remains[i],i);
+		if (poll_kthread->nomem_remains[i] == 1) {
+			poll_kthread->nomem_remains[i] = 0;
+			// msleep(100);
+			if (poll_kthread->nomem_try_times[i] < 100)
+				goto POLL_RX;
+			else
+				wcn_usb_err("%s no mem try get failed ",__func__);
+			poll_kthread->nomem_try_times[i]++;
+		}
+		else if (poll_kthread->transfer_remains[i]) 
+			goto POLL_RX;
+	}
+}
+#endif
+void wcn_usb_init_poll_thread(void)
+{
+#ifndef CONFIG_WCN_USB_USE_THREAD
+#ifdef CONFIG_WCN_USB_CH25_USE_WORKQUEUE
+	INIT_WORK(&poll_work.wcn_poll_work, wcn_usb_poll_func);
+#else
+	tasklet_init(&poll_work.wcn_poll_tasklet, wcn_usb_poll_func, 0);
+#endif
+	spin_lock_init(&poll_work.lock);
+#ifdef CONFIG_WCN_USB_ALL_IN_ONE_TASKLET
+	tasklet_init(&rx_tx_tasklet.wcn_usb_rx_tx_tasklet, rx_tx_tasklet_func, 0);
+	spin_lock_init(&rx_tx_tasklet.lock);
+	INIT_LIST_HEAD(&rx_tx_tasklet.rx_tx_head);
+#endif
+#endif	
+}
+
+void wcn_usb_deinit_poll_thread(void)
+{
+#ifndef CONFIG_WCN_USB_USE_THREAD
+#ifndef CONFIG_WCN_USB_CH25_USE_WORKQUEUE
+	tasklet_kill(&poll_work.wcn_poll_tasklet);
+#endif
+#ifdef CONFIG_WCN_USB_ALL_IN_ONE_TASKLET
+	tasklet_kill(&rx_tx_tasklet.wcn_usb_rx_tx_tasklet);
+#endif
+#endif	
+}
+
 
 void wcn_usb_work_data_init(struct wcn_usb_work_data *work_data, int id)
 {
@@ -1498,15 +1940,26 @@ void wcn_usb_work_data_init(struct wcn_usb_work_data *work_data, int id)
 	mutex_init(&work_data->channel_lock);
 	spin_lock_init(&work_data->lock);
 	init_waitqueue_head(&work_data->wait_mbuf);
+#ifdef CONFIG_WCN_USB_USE_THREAD
 	work_data->wcn_usb_thread = kthread_create(wcn_usb_work_func, work_data,
 			"wcn_thread%d", id);
+#else	
+	if (id == WCN_USB_LOG_CHN_NUM)//log channel
+		INIT_WORK(&work_data->wcn_usb_rx_tx_work, wcn_usb_rx_tx_func);
+#ifndef CONFIG_WCN_USB_ALL_IN_ONE_TASKLET
+	else	
+		tasklet_init(&work_data->wcn_usb_rx_tx_tasklet, wcn_usb_rx_tx_tasklet_func, (unsigned long)work_data);
+#endif //CONFIG_WCN_USB_ALL_IN_ONE_TASKLET
+#endif //CONFIG_WCN_USB_USE_THREAD
 	init_waitqueue_head(&work_data->work_completion);
 	init_completion(&work_data->callback_complete);
 	INIT_LIST_HEAD(&work_data->rx_tx_head);
+#ifdef CONFIG_WCN_USB_USE_THREAD
 	if (work_data->wcn_usb_thread)
 		wake_up_process(work_data->wcn_usb_thread);
 	else
 		wcn_usb_err("%s create a new thread failed\n", __func__);
+#endif
 }
 
 struct wcn_usb_rx_apostle {
@@ -1515,6 +1968,16 @@ struct wcn_usb_rx_apostle {
 	int buf_size;
 	int chn;
 };
+
+void wcn_usb_work_data_deinit(struct wcn_usb_work_data *work_data, int id)
+{
+#ifndef CONFIG_WCN_USB_USE_THREAD
+#ifndef CONFIG_WCN_USB_ALL_IN_ONE_TASKLET
+	if (id != WCN_USB_LOG_CHN_NUM)//log channel
+		tasklet_kill(&work_data->wcn_usb_rx_tx_tasklet);
+#endif
+#endif
+}
 
 int wcn_usb_apostle_fire(int chn, void (*fn)(struct wcn_usb_packet *packet))
 {
@@ -1533,18 +1996,18 @@ int wcn_usb_apostle_fire(int chn, void (*fn)(struct wcn_usb_packet *packet))
 		return -ENODEV;
 
 	apostle = wcn_usb_kzalloc(sizeof(struct wcn_usb_rx_apostle),
-			GFP_KERNEL);
+			GFP_ATOMIC);
 	if (!apostle)
 		return -ENOMEM;
 
 	apostle->chn = chn;
-	apostle->packet = wcn_usb_alloc_packet(GFP_KERNEL);
+	apostle->packet = wcn_usb_alloc_packet(GFP_ATOMIC);
 	if (!apostle->packet) {
 		ret = -ENOMEM;
 		goto FREE_APOSTLE;
 	}
 
-	ret = wcn_usb_packet_bind(apostle->packet, ep, GFP_KERNEL);
+	ret = wcn_usb_packet_bind(apostle->packet, ep, GFP_ATOMIC);
 	if (ret)
 		goto FREE_APOSTLE_PACKET;
 
@@ -1553,14 +2016,14 @@ int wcn_usb_apostle_fire(int chn, void (*fn)(struct wcn_usb_packet *packet))
 	if (wcn_usb_channel_is_sg(chn) || wcn_usb_channel_is_copy(chn))
 		apostle->buf_size = apostle->buf_size * TRANSF_UNITS + 1;
 
-	apostle->buf = wcn_usb_kzalloc(apostle->buf_size, GFP_KERNEL);
+	apostle->buf = wcn_usb_kzalloc(apostle->buf_size, GFP_ATOMIC);
 	if (!apostle->buf) {
 		ret = -ENOMEM;
 		goto FREE_APOSTLE_PACKET;
 	}
 
 	ret = wcn_usb_packet_set_buf(apostle->packet, apostle->buf,
-			apostle->buf_size, GFP_KERNEL);
+			apostle->buf_size, GFP_ATOMIC);
 	if (ret)
 		goto FREE_APOSTLE_BUF;
 
@@ -1603,7 +2066,7 @@ static void wcn_usb_rx_trash(int chn, int num)
 
 struct int_info {
 	unsigned int count;
-	unsigned short report_num[6];
+	unsigned short report_num[8];
 };
 
 #define loop_check_cmd "at+loopcheck\r"
@@ -1652,13 +2115,18 @@ static void wcn_usb_rx_apostle_callback(struct wcn_usb_packet *packet)
 	static unsigned int interrupt_count;
 	char log_info[64];
 	struct int_info *apostle_info = NULL;
+#ifndef CONFIG_WCN_USB_USE_THREAD
+	struct wcn_usb_poll_kthread *poll_work_thread;
+#endif
 
 	channel_debug_interrupt_callback(1);
 	apostle = wcn_usb_packet_get_pdata(packet);
 	ret = wcn_usb_packet_get_status(packet);
+	wcn_usb_debug("%s get apostle [%d], chn[%d], numEp[%d]\n",__func__, ret, packet->ep->channel, packet->ep->numEp);
 	if (ret) {
 		wcn_usb_info_ratelimited("%s get apostle error[%d]\n",
 					 __func__, ret);
+		udelay(300);
 		goto RESUBMIT_PACKET;
 	}
 	total_len = wcn_usb_packet_recv_len(packet);
@@ -1685,18 +2153,37 @@ static void wcn_usb_rx_apostle_callback(struct wcn_usb_packet *packet)
 	}
 
 	apostle_info = (struct int_info *)(apostle->buf);
+#ifndef CONFIG_WCN_USB_USE_THREAD
+	poll_work_thread = &poll_work;
+	spin_lock(&poll_work_thread->lock);
+#endif
 	for (i = 0; i < ARRAY_SIZE(report_num_map_chn) - 1; i++) {
 		int channel;
 
 		channel = report_num_map_chn[i];
 		work_data = wcn_usb_store_get_channel_info(channel);
+		if (!work_data)
+			continue;
+#ifdef CONFIG_WCN_USB_USE_THREAD
 		spin_lock(&work_data->lock);
 		work_data->report_num = apostle_info->report_num[i];
 		spin_unlock(&work_data->lock);
 
 		channel_debug_report_num(channel, apostle_info->report_num[i]);
 		complete(&work_data->callback_complete);
+#else
+		poll_work_thread->report_num[i] = apostle_info->report_num[i];
+#endif
 	}
+#ifndef CONFIG_WCN_USB_USE_THREAD
+	spin_unlock(&poll_work_thread->lock);
+	// complete(&poll_work_thread->callback_complete);
+#ifdef CONFIG_WCN_USB_CH25_USE_WORKQUEUE
+	schedule_work(&poll_work_thread->wcn_poll_work);
+#else
+	tasklet_schedule(&poll_work_thread->wcn_poll_tasklet);
+#endif//CONFIG_WCN_USB_CH25_USE_WORKQUEUE
+#endif//CONFIG_WCN_USB_USE_THREAD
 	channel_debug_cp_num(apostle_info->count);
 RESUBMIT_PACKET:
 	if (wcn_usb_state_get(error_happen)) {
@@ -1731,3 +2218,68 @@ int wcn_usb_apostle_begin(int chn)
 	return wcn_usb_apostle_fire(chn, wcn_usb_rx_apostle_callback);
 }
 
+int wcn_usb_apostle_stop(int chn)
+{
+	struct wcn_usb_ep *apostle_ep;
+	apostle_ep = wcn_usb_store_get_epFRchn(chn);
+	if (likely(apostle_ep)) {
+		wcn_usb_info("%s kill urb of chn[%d]\n", __func__, chn);
+		usb_kill_anchored_urbs(&apostle_ep->submitted);
+	} else {
+		wcn_usb_err("%s urb not exit of chn[%d]\n", __func__, chn);
+	}
+	return 0;
+}
+
+int wcn_usb_tx_rx_chn_stop(void)
+{
+	int chn, ret = 0;
+	struct wcn_usb_ep *tx_rx_ep;
+
+	for (chn = 1; chn < 16; chn++) {
+		tx_rx_ep = wcn_usb_store_get_epFRchn(chn);
+		if (tx_rx_ep) {
+			wcn_usb_info("%s check tx chn[%d]\n", __func__, chn);
+			if (!usb_anchor_empty(&tx_rx_ep->submitted)) {
+				wcn_usb_err("%s tx chn[%d] remaining to be sent\n", __func__, chn);
+				ret = -1;
+				return ret;
+			}
+		}
+	}
+	
+	for (chn = 16; chn < 32; chn++) {
+		tx_rx_ep = wcn_usb_store_get_epFRchn(chn);
+		if (tx_rx_ep) {
+			wcn_usb_info("%s kill urb of chn[%d]\n", __func__, chn);
+			usb_kill_anchored_urbs(&tx_rx_ep->submitted);
+		}
+	}
+	return ret;
+}
+
+int wcn_usb_copy_thread_deinit(void)
+{
+	struct wcn_usb_copy_kthread *copy_work0 = &copy_work[0];
+#ifdef CONFIG_WCN_USB_USE_THREAD
+	struct wcn_usb_copy_kthread *copy_work1 = &copy_work[1];
+#endif
+	wcn_usb_info("%s start!\n", __func__);
+	copy_work0->exit_flag = 1;
+#ifdef CONFIG_WCN_USB_USE_THREAD
+	copy_work1->exit_flag = 1;
+#endif
+	if(copy_work[0].wcn_usb_thread) {
+		complete(&copy_work0->callback_complete);
+		kthread_stop(copy_work[0].wcn_usb_thread);
+		copy_work[0].wcn_usb_thread = NULL;
+	}
+#ifdef CONFIG_WCN_USB_USE_THREAD
+	if(copy_work[1].wcn_usb_thread) {
+		complete(&copy_work1->callback_complete);
+		kthread_stop(copy_work[1].wcn_usb_thread);
+		copy_work[1].wcn_usb_thread = NULL;
+	}
+#endif
+	return 0;
+}

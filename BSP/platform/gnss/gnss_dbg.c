@@ -373,7 +373,7 @@ static struct miscdevice gnss_slog_device = {
 	.fops = &gnss_slog_fops,
 };
 
-int __init gnss_module_init(void)
+int gnss_module_init(void)
 {
 	int ret;
 
@@ -406,16 +406,18 @@ int __init gnss_module_init(void)
 	return ret;
 }
 
-void __exit gnss_module_exit(void)
+void gnss_module_exit(void)
 {
 	gnss_ring_destroy(gnss_rx_ring);
 	gnss_device_destroy();
 	misc_deregister(&gnss_dbg_device);
 	misc_deregister(&gnss_slog_device);
 }
-
-#if(0)
+#if 0
 module_init(gnss_module_init);
 module_exit(gnss_module_exit);
 MODULE_LICENSE("GPL");
+#else
+EXPORT_SYMBOL(gnss_module_init);
+EXPORT_SYMBOL(gnss_module_exit);
 #endif

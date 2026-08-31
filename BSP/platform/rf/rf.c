@@ -7,6 +7,7 @@
 #include <linux/kdev_t.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
+#include "marlin_platform.h"
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/printk.h>
@@ -16,9 +17,7 @@
 #include <linux/timer.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
-#include <linux/version.h>
 #include <linux/vmalloc.h>
-#include <marlin_platform.h>
 #include "rf.h"
 #include "wcn_integrate.h"
 
@@ -434,7 +433,7 @@ static int wifi_nvm_set_cmd(struct nvm_name_table *pTable,
 
 	p = (unsigned char *)(p_data) + pTable->mem_offset;
 
-	pr_info("[g_table]%s, offset:%u, num:%u, value: %x %x %x",
+	wl_info("[g_table]%s, offset:%u, num:%u, value: %x %x %x",
 		pTable->itm, pTable->mem_offset, cmd->num,
 		cmd->par[0], cmd->par[1], cmd->par[2]);
 	pr_debug(", %x %x %x %x %x %x\n",
@@ -515,7 +514,7 @@ static struct nvm_name_table *cf_table_match(struct nvm_cali_cmd *cmd)
 	struct nvm_name_table *pTable = NULL;
 	int len = sizeof(g_config_table) / sizeof(struct nvm_name_table);
 
-	if ((cmd == NULL) || (cmd->itm == NULL))
+	if (cmd == NULL)
 		return NULL;
 	for (i = 0; i < len; i++) {
 		if (g_config_table[i].itm == NULL)
@@ -534,7 +533,7 @@ static struct nvm_name_table *cali_table_match(struct nvm_cali_cmd *cmd)
 	struct nvm_name_table *pTable = NULL;
 	int len = sizeof(g_cali_table) / sizeof(struct nvm_name_table);
 
-	if ((cmd == NULL) || (cmd->itm == NULL))
+	if (cmd == NULL)
 		return NULL;
 	for (i = 0; i < len; i++) {
 		if (g_cali_table[i].itm == NULL)
@@ -586,7 +585,8 @@ static int wifi_nvm_parse(const char *path, const int type, void *p_data)
 	unsigned int read_len, buffer_len;
 	struct file *file;
 	char *buffer = NULL;
-	loff_t file_size = 0, pos = 0;
+	loff_t file_size = 0;
+	loff_t file_offset = 0;
 
 	pr_info("%s()...\n", __func__);
 
@@ -597,6 +597,11 @@ static int wifi_nvm_parse(const char *path, const int type, void *p_data)
 	}
 
 	file_size = vfs_llseek(file, 0, SEEK_END);
+	if (file_size < 0) {
+		fput(file);
+		pr_err("vfs_llseek error\n");
+		return -1;
+	}
 	buffer_len = 0;
 	buffer = vmalloc(file_size);
 	p_buf = buffer;
@@ -607,11 +612,7 @@ static int wifi_nvm_parse(const char *path, const int type, void *p_data)
 	}
 
 	do {
-#if KERNEL_VERSION(4, 14, 0) <= LINUX_VERSION_CODE
-		read_len = kernel_read(file, (void *)p_buf, file_size, &pos);
-#else
-		read_len = kernel_read(file, pos, p_buf, file_size);
-#endif
+		read_len = kernel_read(file, p_buf, file_size, &file_offset);
 		if (read_len > 0) {
 			buffer_len += read_len;
 			file_size -= read_len;
@@ -633,7 +634,8 @@ int get_connectivity_config_param(struct wifi_config_t *p)
 	int ret;
 	char *path = VENDOR_WIFI_CONFIG_FILE;
 #ifdef CONFIG_SC2342_INTEG
-	if (wcn_get_aon_chip_id() == WCN_SHARKLE_CHIP_AD) {
+	if ((wcn_get_aon_chip_id() == WCN_SHARKLE_CHIP_AD) ||
+		(wcn_get_aon_chip_id() == WCN_SHARKL3_CHIP_22NM)) {
 		path = SYSTEM_WIFI_CONFIG_AD_FILE;
 		ret = wifi_nvm_parse(path, CONF_TYPE, (void *)p);
 		if (!ret)
@@ -653,6 +655,7 @@ int get_connectivity_config_param(struct wifi_config_t *p)
 		} else {
 			filp_close(file, NULL);
 			if ((wcn_get_aon_chip_id() != WCN_SHARKLE_CHIP_AD) &&
+			    (wcn_get_aon_chip_id() != WCN_SHARKL3_CHIP_22NM) &&
 			    (wcn_get_aon_chip_id() != WCN_PIKE2_CHIP_AB))
 				path = VENDOR_WIFI_CONFIG_FILE;
 		}
@@ -669,7 +672,8 @@ int get_connectivity_cali_param(struct wifi_cali_t *p)
 	char *path = VENDOR_WIFI_CALI_FILE;
 
 #ifdef CONFIG_SC2342_INTEG
-	if (wcn_get_aon_chip_id() == WCN_SHARKLE_CHIP_AD) {
+	if ((wcn_get_aon_chip_id() == WCN_SHARKLE_CHIP_AD) ||
+		(wcn_get_aon_chip_id() == WCN_SHARKL3_CHIP_22NM)) {
 		path = SYSTEM_WIFI_CALI_AD_FILE;
 		ret = wifi_nvm_parse(path, CALI_TYPE, (void *)p);
 		if (!ret)
@@ -689,6 +693,7 @@ int get_connectivity_cali_param(struct wifi_cali_t *p)
 		} else {
 			filp_close(file, NULL);
 			if ((wcn_get_aon_chip_id() != WCN_SHARKLE_CHIP_AD) &&
+			    (wcn_get_aon_chip_id() != WCN_SHARKL3_CHIP_22NM) &&
 			    (wcn_get_aon_chip_id() != WCN_PIKE2_CHIP_AB))
 				path = VENDOR_WIFI_CALI_FILE;
 		}
@@ -705,7 +710,7 @@ static int write_file(struct file *fp, char *buf, size_t len)
 	loff_t offset = 0;
 
 	offset = vfs_llseek(fp, 0, SEEK_END);
-	if (kernel_write(fp, buf, len, offset) < 0) {
+	if (kernel_write(fp, buf, len, &offset) < 0) {
 		pr_err("kernel_write() for fp failed:");
 		return -1;
 	}

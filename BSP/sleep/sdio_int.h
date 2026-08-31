@@ -1,8 +1,7 @@
 #ifndef __SDIO_INT_H__
 #define __SDIO_INT_H__
-#include <linux/device.h>
-#include <linux/version.h>
 
+#include <linux/device.h>
 #define SLP_MGR_HEADER "[slp_mgr]"
 
 #define SLP_MGR_ERR(fmt, args...)	\
@@ -22,8 +21,6 @@ enum AP_INT_CP_BIT {
 	BT_BIN_DOWNLOAD,
 	SAVE_CP_MEM,
 	TEST_DEL_THREAD,
-	AP_SUSPEND,
-	AP_RESUME,
 
 	INT_CP_MAX = 8,
 };
@@ -102,11 +99,12 @@ struct sdio_int_t {
 	unsigned int pub_int_clr0;
 	unsigned int pub_int_sts0;
 	PUB_INT_ISR pub_int_cb[PUB_INT_MAX];
-	/*wakeup_source pointer*/
-	struct wakeup_source *pub_int_ws;
-
+	struct wakeup_source *pub_int_wakelock;
 	struct completion pub_int_completion;
 	unsigned int pub_int_num;
+#ifdef CONFIG_ASR_BOARD
+	unsigned int pub_irq_num;
+#endif
 	/* 1: power on, 0: power off */
 	atomic_t chip_power_on;
 };
@@ -121,7 +119,7 @@ int sdio_ap_int_cp0(enum AP_INT_CP_BIT bit);
 /* pub int api */
 int sdio_pub_int_btwf_en0(void);
 int sdio_pub_int_gnss_en0(void);
-int sdio_pub_int_RegCb(enum PUB_INT_BIT bit,
+int sdio_pub_int_regcb(enum PUB_INT_BIT bit,
 		PUB_INT_ISR isr_handler);
 void sdio_pub_int_poweron(bool state);
 int sdio_pub_int_init(int irq);

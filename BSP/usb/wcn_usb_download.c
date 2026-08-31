@@ -4,6 +4,7 @@
 #include <linux/uaccess.h>
 #include <linux/kthread.h>
 #include <wcn_bus.h>
+#include <linux/version.h>
 
 #define mbuf_list_iter(head, num, pos, posN) \
 	for (pos = head, posN = 0; posN < num && pos; posN++, pos = pos->next)
@@ -82,7 +83,11 @@ static int wcn_usb_dopen(struct inode *inode, struct file *file)
 {
 	struct wcn_usb_ddata *data;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 17, 0)
+	data = (struct wcn_usb_ddata *)pde_data(inode);
+#else
 	data = (struct wcn_usb_ddata *)PDE_DATA(inode);
+#endif
 
 	if (!data)
 		return -EIO;
@@ -309,6 +314,15 @@ static int wcn_usb_drelease(struct inode *inode, struct file *file)
 	return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+static const struct proc_ops wcn_usb_dops = {
+	.proc_read = wcn_usb_dread,
+	.proc_write = wcn_usb_dwrite,
+	.proc_open = wcn_usb_dopen,
+	.proc_release = wcn_usb_drelease,
+	.proc_lseek = noop_llseek,
+};
+#else
 static const struct file_operations wcn_usb_dops = {
 	.owner = THIS_MODULE,
 	.read = wcn_usb_dread,
@@ -317,6 +331,7 @@ static const struct file_operations wcn_usb_dops = {
 	.release = wcn_usb_drelease,
 	.llseek = noop_llseek,
 };
+#endif
 
 int wcn_usb_dinit(void)
 {

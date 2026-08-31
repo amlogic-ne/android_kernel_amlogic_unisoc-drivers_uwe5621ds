@@ -14,7 +14,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #ifdef CONFIG_SC2342_INTEG
-#include <linux/gnss.h>
+#include "gnss.h"
 #endif
 #include <linux/kthread.h>
 #include <linux/printk.h>
@@ -25,14 +25,15 @@
 #include <linux/syscalls.h>
 #include <linux/unistd.h>
 #include <linux/wait.h>
-#include <marlin_platform.h>
-#include <wcn_bus.h>
+#include <linux/version.h>
+#include "marlin_platform.h"
+#include "wcn_bus.h"
 
+#include "wcn_glb.h"
 #include "gnss_common.h"
 #include "gnss_dump.h"
 #include "mdbg_type.h"
-#include "wcn_glb.h"
-#include "wcn_glb_reg.h"
+#include "../../include/wcn_glb_reg.h"
 
 #define GNSSDUMP_INFO(format, arg...) pr_info("gnss_dump: " format, ## arg)
 #define GNSSDUMP_ERR(format, arg...) pr_err("gnss_dump: " format, ## arg)
@@ -49,11 +50,7 @@ struct gnss_mem_dump {
 
 /* dump cp firmware firstly, wait for next adding */
 static struct gnss_mem_dump gnss_marlin3_dump[] = {
-#ifndef CONFIG_CHECK_DRIVER_BY_CHIPID
 	{GNSS_CP_START_ADDR, GNSS_FIRMWARE_MAX_SIZE}, /* gnss firmware code */
-#else
-	{0,0},
-#endif
 	{GNSS_DRAM_ADDR, GNSS_DRAM_SIZE}, /* gnss dram */
 	{GNSS_TE_MEM, GNSS_TE_MEM_SIZE}, /* gnss te mem */
 	{GNSS_BASE_AON_APB, GNSS_BASE_AON_APB_SIZE}, /* aon apb */
@@ -105,32 +102,18 @@ static char gnss_dump_level; /* 0: default, all, 1: only data, pmu, aon */
 
 #endif
 
-
-static int wcn_chmod(char *path, char *mode)
-{
-	int result = 0;
-	char cmd_path[] = "/system/bin/chmod";
-	char *cmd_argv[] = {cmd_path, mode, path, NULL};
-	char *cmd_envp[] = {"HOME=/", "PATH=/sbin:/bin:/system/bin", NULL};
-
-	result = call_usermodehelper(cmd_path, cmd_argv, cmd_envp,
-		UMH_WAIT_PROC);
-
-	return result;
-}
-
 static int gnss_creat_gnss_dump_file(void)
 {
 	gnss_dump_file = filp_open(GNSS_MEMDUMP_PATH,
 		O_RDWR | O_CREAT | O_TRUNC, 0666);
-	GNSSDUMP_INFO("gnss_creat_gnss_dump_file entry\n");
+	GNSSDUMP_ERR("gnss_creat_gnss_dump_file entry\n");
 	if (IS_ERR(gnss_dump_file)) {
 		GNSSDUMP_ERR("%s error is %p\n",
 			__func__, gnss_dump_file);
 		return -1;
 	}
-	if (wcn_chmod(GNSS_MEMDUMP_PATH, "0666") != 0)
-		GNSSDUMP_ERR("%s chmod	error\n", __func__);
+//	if (sys_chmod(GNSS_MEMDUMP_PATH, 0666) != 0)
+//		GNSSDUMP_ERR("%s chmod	error\n", __func__);
 
 	return 0;
 }
@@ -141,7 +124,7 @@ static void gnss_write_data_to_phy_addr(phys_addr_t phy_addr,
 {
 	void *virt_addr;
 
-	GNSSDUMP_INFO("gnss_write_data_to_phy_addr entry\n");
+	GNSSDUMP_ERR("gnss_write_data_to_phy_addr entry\n");
 	virt_addr = shmem_ram_vmap_nocache(phy_addr, size);
 	if (virt_addr) {
 		memcpy(virt_addr, src_data, size);
@@ -155,7 +138,7 @@ static void gnss_read_data_from_phy_addr(phys_addr_t phy_addr,
 {
 	void *virt_addr;
 
-	GNSSDUMP_INFO("gnss_read_data_from_phy_addr\n");
+	GNSSDUMP_ERR("gnss_read_data_from_phy_addr\n");
 	virt_addr = shmem_ram_vmap_nocache(phy_addr, size);
 	if (virt_addr) {
 		memcpy(tar_data, virt_addr, size);
@@ -171,7 +154,7 @@ static void gnss_hold_cpu(void)
 	phys_addr_t base_addr;
 	int i = 0;
 
-	GNSSDUMP_INFO("gnss_hold_cpu entry\n");
+	GNSSDUMP_ERR("gnss_hold_cpu entry\n");
 	if (wcn_platform_chip_type() == WCN_PLATFORM_TYPE_SHARKL3)
 		regmap = wcn_get_gnss_regmap(REGMAP_WCN_REG);
 	else
@@ -215,7 +198,9 @@ static int gnss_dump_cp_register_data(u32 addr, u32 len)
 	u8 *ptr = NULL;
 	long int ret;
 	void  *iram_buffer = NULL;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
 	mm_segment_t fs;
+#endif
 
 	GNSSDUMP_INFO(" start dump cp register!addr:%x,len:%d\n", addr, len);
 	buf = kzalloc(len, GFP_KERNEL);
@@ -255,14 +240,28 @@ static int gnss_dump_cp_register_data(u32 addr, u32 len)
 		}
 		memcpy(iram_buffer, buf, len);
 	}
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	fs = force_uaccess_begin();
+#else
 	fs = get_fs();
 	set_fs(KERNEL_DS);
+#endif
+#endif
 	pos = gnss_dump_file->f_pos;
-	ret = vfs_write(gnss_dump_file, iram_buffer, len, &pos);
+	ret = vfs_write(gnss_dump_file,
+			(__force const char __user *)iram_buffer,
+			len, &pos);
 	gnss_dump_file->f_pos = pos;
 	kfree(buf);
 	vfree(iram_buffer);
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	force_uaccess_end(fs);
+#else
 	set_fs(fs);
+#endif
+#endif
 	if (ret != len) {
 		GNSSDUMP_ERR("gnss_dump_cp_register_data failed  size is %ld\n",
 			ret);
@@ -274,13 +273,14 @@ static int gnss_dump_cp_register_data(u32 addr, u32 len)
 	return ret;
 }
 
-
 static int gnss_dump_ap_register(void)
 {
 	struct regmap *regmap;
 	u32 value[GNSS_DUMP_REG_NUMBER + 1] = {0}; /* [0]board+ [..]reg */
 	u32 i = 0;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
 	mm_segment_t fs;
+#endif
 	u32 len = 0;
 	u8 *ptr = NULL;
 	int ret;
@@ -333,13 +333,27 @@ static int gnss_dump_ap_register(void)
 	}
 	memset(apreg_buffer, 0, len);
 	memcpy(apreg_buffer, ptr, len);
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	fs = force_uaccess_begin();
+#else
 	fs = get_fs();
 	set_fs(KERNEL_DS);
+#endif
+#endif
 	pos = gnss_dump_file->f_pos;
-	ret = vfs_write(gnss_dump_file, apreg_buffer, len, &pos);
+	ret = vfs_write(gnss_dump_file,
+			(__force const char __user *)apreg_buffer,
+			len, &pos);
 	gnss_dump_file->f_pos = pos;
 	vfree(apreg_buffer);
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	force_uaccess_end(fs);
+#else
 	set_fs(fs);
+#endif
+#endif
 	if (ret != len)
 		GNSSDUMP_ERR("%s not write completely,ret is 0x%x\n", __func__,
 			ret);
@@ -389,14 +403,22 @@ static int gnss_dump_share_memory(u32 len)
 	void *virt_addr;
 	phys_addr_t base_addr;
 	long int ret;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
 	mm_segment_t fs;
+#endif
 	void  *ddr_buffer = NULL;
 
 	if (len == 0)
 		return -1;
 	GNSSDUMP_INFO("gnss_dump_share_memory\n");
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	fs = force_uaccess_begin();
+#else
 	fs = get_fs();
 	set_fs(KERNEL_DS);
+#endif
+#endif
 	base_addr = wcn_get_gnss_base_addr();
 	virt_addr = shmem_ram_vmap_nocache(base_addr, len);
 	if (!virt_addr) {
@@ -421,10 +443,18 @@ static int gnss_dump_share_memory(u32 len)
 	memset(ddr_buffer, 0, len);
 	memcpy(ddr_buffer, virt_addr, len);
 	pos = gnss_dump_file->f_pos;
-	ret = vfs_write(gnss_dump_file, ddr_buffer, len, &pos);
+	ret = vfs_write(gnss_dump_file,
+			(__force const char __user *)ddr_buffer,
+			len, &pos);
 	gnss_dump_file->f_pos = pos;
 	shmem_ram_unmap(virt_addr);
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	force_uaccess_end(fs);
+#else
 	set_fs(fs);
+#endif
+#endif
 	vfree(ddr_buffer);
 	if (ret != len) {
 		GNSSDUMP_ERR("%s dump ddr error,data len is %ld\n", __func__,
@@ -484,7 +514,9 @@ static int gnss_ext_dump_data(unsigned int start_addr, int len)
 {
 	u8 *buf = NULL;
 	int ret = 0, count = 0, trans = 0;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
 	mm_segment_t fs;
+#endif
 
 	GNSSDUMP_INFO("%s, addr:%x,len:%d\n", __func__, start_addr, len);
 	buf = kzalloc(DUMP_PACKET_SIZE, GFP_KERNEL);
@@ -502,8 +534,14 @@ static int gnss_ext_dump_data(unsigned int start_addr, int len)
 			return PTR_ERR(gnss_dump_file);
 		}
 	}
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	fs = force_uaccess_begin();
+#else
 	fs = get_fs();
 	set_fs(KERNEL_DS);
+#endif
+#endif
 	while (count < len) {
 		trans = (len - count) > DUMP_PACKET_SIZE ?
 				 DUMP_PACKET_SIZE : (len - count);
@@ -514,7 +552,9 @@ static int gnss_ext_dump_data(unsigned int start_addr, int len)
 		}
 		count += trans;
 		pos = gnss_dump_file->f_pos;
-		ret = vfs_write(gnss_dump_file, buf, trans, &pos);
+		ret = vfs_write(gnss_dump_file,
+				(__force const char __user *)buf,
+				trans, &pos);
 		gnss_dump_file->f_pos = pos;
 		if (ret != trans) {
 			GNSSDUMP_ERR("%s failed size is %d, ret %d\n", __func__,
@@ -527,7 +567,13 @@ static int gnss_ext_dump_data(unsigned int start_addr, int len)
 
 dump_data_done:
 	kfree(buf);
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	force_uaccess_end(fs);
+#else
 	set_fs(fs);
+#endif
+#endif
 	return ret;
 }
 
@@ -537,11 +583,6 @@ static int gnss_ext_dump_mem(void)
 	int i = 0;
 
 	GNSSDUMP_INFO("%s entry\n", __func__);
-// #ifdef CONFIG_CHECK_DRIVER_BY_CHIPID
-	/*update the two address after get chip type*/
-	gnss_marlin3_dump[0].address = GNSS_CP_START_ADDR;
-	gnss_marlin3_dump[0].length = GNSS_FIRMWARE_MAX_SIZE;
-// #endif
 	gnss_ext_hold_cpu();
 	ret = gnss_creat_gnss_dump_file();
 	if (ret == -1) {

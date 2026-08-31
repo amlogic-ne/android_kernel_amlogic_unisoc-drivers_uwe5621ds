@@ -15,6 +15,7 @@
 #define __PCIE_DRV_H__
 
 #include <linux/pci.h>
+#include "wcn_bus.h"
 
 #define DRVER_NAME      "wcn_pcie"
 
@@ -42,6 +43,31 @@
 #define OBREG1_OFFSET_ADDR	(0x10000 + (1 * 0x200))
 #define IBREG1_OFFSET_ADDR	(0x10000 + (1 * 0x200) + 0x100)
 
+#ifdef CONFIG_UMW2653
+#define EP_IBAR0_BASE		0X40800000
+#define EDMA_GLB_REG_BASE	0x600000
+#define EDMA_CHN_REG_BASE	0x601000
+/* 8M align */
+#define EP_INBOUND_ALIGN	0x800000
+#else
+#define EP_IBAR0_BASE		0x40000000
+#define EDMA_GLB_REG_BASE	0x160000
+#define EDMA_CHN_REG_BASE	0X161000
+/* 4M align */
+#define EP_INBOUND_ALIGN	0x400000
+#endif
+/* 4K align */
+#define EP_OUTBOUND_ALIGN	0x1000
+
+/* Parameters for the waiting for iATU enabled routine */
+#define LINK_WAIT_MAX_IATU_RETRIES	5
+#define LINK_WAIT_IATU			9
+#define PCIE_ATU_ENABLE			(0x1 << 31)
+#define PCIE_ATU_BAR_MODE_ENABLE	(0x1 << 30)
+
+#define BUS_REMOVE_CARD_VAL 0x8000
+#define WCN_CARD_EXIST(xmit) \
+	(atomic_read(xmit) < BUS_REMOVE_CARD_VAL)
 
 struct bar_info {
 	resource_size_t mmio_start;
@@ -58,6 +84,13 @@ struct dma_buf {
 	int size;
 };
 
+struct sub_sys_pm_state {
+	unsigned int bt:2;
+	unsigned int wifi:2;
+	unsigned int fm:2;
+	unsigned int state:2;
+	unsigned int rsvd:26;
+};
 struct wcn_pcie_info {
 	struct pci_dev *dev;
 	struct pci_saved_state *saved_state;
@@ -71,6 +104,7 @@ struct wcn_pcie_info {
 	int bar_num;
 	struct bar_info bar[8];
 	struct msix_entry msix[100];
+	struct sub_sys_pm_state pm_state;
 	/* board info */
 	unsigned char revision;
 	unsigned char irq_pin;
@@ -79,7 +113,16 @@ struct wcn_pcie_info {
 	unsigned short sub_system_id;
 	unsigned short vendor_id;
 	unsigned short device_id;
+	unsigned int card_dump_flag;
 	struct char_drv_info *p_char;
+	enum wcn_bus_state pci_status;
+	struct completion scan_done;
+	struct completion remove_done;
+	atomic_t xmit_cnt;
+	atomic_t edma_ready;
+	atomic_t tx_complete;
+	atomic_t card_exist;
+	struct mutex pm_lock;
 };
 
 struct inbound_reg {
@@ -101,10 +144,9 @@ struct outbound_reg {
 	unsigned int lower_target_addr;
 	unsigned int upper_target_addr;
 } __packed;
-
-int pcie_bar_write(struct wcn_pcie_info *priv, int bar, int offset, char *buf,
+int pcie_bar_write(struct wcn_pcie_info *priv, int bar, int offset, void *buf,
 		   int len);
-int pcie_bar_read(struct wcn_pcie_info *priv, int bar, int offset, char *buf,
+int pcie_bar_read(struct wcn_pcie_info *priv, int bar, int offset, void *buf,
 		  int len);
 char *pcie_bar_vmem(struct wcn_pcie_info *priv, int bar);
 int dmalloc(struct wcn_pcie_info *priv, struct dma_buf *dm, int size);
@@ -113,6 +155,39 @@ unsigned char *ibreg_base(struct wcn_pcie_info *priv, char region);
 unsigned char *obreg_base(struct wcn_pcie_info *priv, char region);
 int pcie_config_read(struct wcn_pcie_info *priv, int offset, char *buf,
 		     int len);
-int sprd_pcie_bar_map(struct wcn_pcie_info *priv, int bar, unsigned int addr);
+int sprd_pcie_bar_map(struct wcn_pcie_info *priv, int bar,
+		      unsigned int addr, char region);
+int sprd_pcie_mem_write(unsigned int addr, void *buf, unsigned int len);
+int sprd_pcie_mem_read(unsigned int addr, void *buf, unsigned int len);
+int sprd_pcie_update_bits(unsigned int reg, unsigned int mask,
+			  unsigned int val);
 struct wcn_pcie_info *get_wcn_device_info(void);
+
+#ifdef CONFIG_PCIEASPM
+int sprd_pcie_set_aspm_policy(enum sub_sys subsys, enum wcn_bus_pm_state state);
+enum wcn_bus_pm_state sprd_pcie_get_aspm_policy(void);
+#else
+static inline int sprd_pcie_set_aspm_policy(enum sub_sys subsys,
+					    enum wcn_bus_pm_state state)
+{
+	return -EINVAL;
+}
+static inline enum wcn_bus_pm_state sprd_pcie_get_aspm_policy(void)
+{
+	return 0;
+}
+#endif
+
+int wcn_pcie_get_bus_status(void);
+void sprd_pcie_set_carddump_status(unsigned int flag);
+unsigned int sprd_pcie_get_carddump_status(void);
+int sprd_pcie_scan_card(void *wcn_dev);
+void sprd_pcie_register_scan_notify(void *func);
+void sprd_pcie_remove_card(void *wcn_dev);
+u32 sprd_pcie_read_reg32(struct wcn_pcie_info *priv, int offset);
+void sprd_pcie_write_reg32(struct wcn_pcie_info *priv, u32 reg_offset,
+			   u32 value);
+int wcn_get_edma_status(void);
+int wcn_set_tx_complete_status(int flag);
+int wcn_get_tx_complete_status(void);
 #endif

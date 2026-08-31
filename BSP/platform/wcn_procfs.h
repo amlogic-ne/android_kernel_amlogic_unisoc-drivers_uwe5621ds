@@ -7,13 +7,17 @@
 #define MDBG_LOOPCHECK_SIZE		(128)
 #define MDBG_AT_CMD_SIZE		(128)
 
+#ifdef CONFIG_THIRD_PARTY_BOARD
 unsigned char *mdbg_get_at_cmd_buf(void);
+#endif
+void mdbg_fs_channel_init(void);
+void mdbg_fs_channel_destroy(void);
 int proc_fs_init(void);
 int mdbg_memory_alloc(void);
 void proc_fs_exit(void);
 int get_loopcheck_status(void);
 void wakeup_loopcheck_int(void);
-void loopcheck_first_boot_clear(void);
-void loopcheck_first_boot_set(void);
-int prepare_free_buf(int chn, int size, int num);
+void loopcheck_ready_clear(void);
+void loopcheck_ready_set(void);
+void mdbg_assert_interface(char *str);
 #endif

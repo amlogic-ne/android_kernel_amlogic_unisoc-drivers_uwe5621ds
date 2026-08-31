@@ -131,7 +131,7 @@ static struct wcn_usb_notifier *wcn_usb_notifier_register(void (*cb)(void *),
 		cb(data);
 
 	/* wait corresponding event */
-	wn = kzalloc(sizeof(struct wcn_usb_notifier), GFP_KERNEL);
+	wn = kzalloc(sizeof(struct wcn_usb_notifier), GFP_ATOMIC);
 	if (!wn)
 		return NULL;
 
@@ -163,6 +163,7 @@ static int wcn_usb_preinit(void)
 		return ret;
 	}
 
+	wcn_usb_init_poll_thread();
 	ret = wcn_usb_store_init();
 	if (ret != 0) {
 		wcn_usb_err("%s wcn usb store init failed!\n", __func__);
@@ -174,17 +175,29 @@ static int wcn_usb_preinit(void)
 		wcn_usb_err("%s wcn usb io init failed!\n", __func__);
 		return ret;
 	}
-
+#ifndef CONFIG_UNISOC_BOARD
 	wcn_usb_notifier_register((void (*)(void *))wcn_usb_apostle_begin,
 			(void *)25, download_over);
+#endif
 	return ret;
 }
 
-static void wcn_usb_deinit(void)
+static void wcn_usb_deinit(void *wcn_dev)
 {
+	wcn_usb_chnmg_exit();
+	wcn_usb_io_delet();
+	wcn_usb_apostle_stop(25);
+#ifdef CONFIG_WCN_USB_USE_THREAD
+	wcn_usb_chn_thread_deinit();
+#endif
+	wcn_usb_copy_thread_deinit();
+	wcn_usb_tx_rx_chn_stop();
+
+	wcn_usb_deinit_copy_men();
+	wcn_usb_deinit_poll_thread();
 	/*TODO deinit all channel! */
 	wcn_usb_store_delet();
-	wcn_usb_io_delet();
+
 	wcn_usb_rx_tx_pool_deinit();
 }
 
@@ -218,9 +231,14 @@ static int wcn_usb_chn_init(struct mchn_ops_t *ops)
 
 	if (ops->inout == 0) {
 		work_data->goon = 1;
+#ifndef CONFIG_UNISOC_BOARD
 		work_data->wn = wcn_usb_notifier_register(
 				(void (*)(void *))wcn_usb_begin_poll_rx,
 				(void *)(long)(ops->channel), download_over);
+#else
+		if(wcn_usb_state_get(download_over))
+			wcn_usb_begin_poll_rx(ops->channel);
+#endif
 	}
 	return 0;
 }
@@ -275,11 +293,16 @@ int wcn_usb_list_alloc(int chn, struct mbuf_t **head,
 
 	channel_debug_mbuf_alloc(chn, *num);
 	/* buf_list_alloc not sure this list is clean!!! so we do this */
-	mbuf_list_iter(*head, *num, mbuf, i) {
-		mbuf->buf = NULL;
-		mbuf->len = 0;
+#ifndef CONFIG_WCN_USB_USE_THREAD
+	if (!wcn_usb_channel_is_rx(chn)) {
+#endif
+		mbuf_list_iter(*head, *num, mbuf, i) {
+			mbuf->buf = NULL;
+			mbuf->len = 0;
+		}
+#ifndef CONFIG_WCN_USB_USE_THREAD
 	}
-
+#endif
 	return ret;
 }
 
@@ -337,7 +360,7 @@ static int wcn_usb_push_list(int chn, struct mbuf_t *head,
 	return wcn_usb_push_list_tx(chn, head, tail, num);
 }
 
-static int wcn_usb_get_hif_type(void)
+static enum wcn_hard_intf_type wcn_usb_get_hif_type(void)
 {
 	return HW_TYPE_USB;
 }
@@ -358,7 +381,8 @@ static void wcn_usb_register_rescan_cb(void *data)
 			(void *)data, dev_plug_fully);
 }
 
-#if (defined CONFIG_USB_EHCI_HCD && defined CONFIG_HISI_BOARD)
+#if ((defined CONFIG_HISI_BOARD || defined CONFIG_GOKE_BOARD) \
+	&& (defined CONFIG_USB_EHCI_HCD))
 #define READ_SIZE PAGE_SIZE
 char ehci_dbg_buf[PAGE_SIZE];
 static int wcn_mount_debugfs(void)
@@ -427,9 +451,10 @@ static void print_ehci_info(void)
 static void wcn_usb_set_carddump_status(unsigned int status)
 {
 	if (status) {
-		#if (defined CONFIG_USB_EHCI_HCD &&  defined CONFIG_HISI_BOARD)
+#if ((defined CONFIG_HISI_BOARD || defined CONFIG_GOKE_BOARD) \
+	&& (defined CONFIG_USB_EHCI_HCD))
 		print_ehci_info();
-		#endif
+#endif
 		wcn_usb_state_sent_event(error_happen);
 	} else
 		wcn_usb_state_sent_event(error_clean);
@@ -454,7 +479,7 @@ static int wcn_usb_runtime_put(void)
 	return 0;
 }
 
-static int wcn_usb_rescan(void)
+static int wcn_usb_rescan(void *wcn_dev)
 {
 	if (!wcn_usb_state_get(error_happen)) {
 		if (wcn_usb_state_get(dev_plug_fully))
@@ -482,7 +507,7 @@ static int wcn_usb_check_cp_ready(unsigned int addr, int timout)
 	static struct wcn_usb_notifier *usb_notifier;
 	int ret = 0;
 
-	sync_complete = kzalloc(sizeof(struct completion), GFP_KERNEL);
+	sync_complete = kzalloc(sizeof(struct completion), GFP_ATOMIC);
 	if (!sync_complete) {
 		ret = -ENOMEM;
 		goto OUT;
@@ -494,7 +519,16 @@ static int wcn_usb_check_cp_ready(unsigned int addr, int timout)
 			(void *)sync_complete, cp_ready);
 	wcn_usb_state_sent_event(pwr_on);
 	wcn_usb_state_sent_event(download_over);
-
+/*
+ In Unisoc Board, use notifier send event download_over here 
+ to begin apostle and poll rx, will trigger CFI failure, so 
+ we workaround here.
+*/
+#ifdef CONFIG_UNISOC_BOARD
+	wcn_usb_apostle_begin(25);
+	wcn_usb_begin_poll_rx(23);  // bsp AT Command Channel
+	wcn_usb_begin_poll_rx(24);  // bsp Mdbg Log Channel
+#endif
 	timeleft = wait_for_completion_timeout(sync_complete, 2*HZ);
 	if (!timeleft)
 		ret = -ETIMEDOUT;
@@ -516,7 +550,7 @@ struct sprdwcn_bus_ops wcn_usb_bus_ops = {
 	.list_alloc = wcn_usb_list_alloc,
 	.list_free = wcn_usb_list_free,
 	.push_list = wcn_usb_push_list,
-	.get_hif_type = wcn_usb_get_hif_type,
+	.get_hwintf_type = wcn_usb_get_hif_type,
 	/* other ops not implemented temporarily */
 	.register_rescan_cb = wcn_usb_register_rescan_cb,
 	.get_carddump_status = wcn_usb_get_carddump_status,

@@ -17,8 +17,8 @@
 #define __SLP_MGR_H__
 
 #include <linux/completion.h>
-#include <marlin_platform.h>
-#include <wcn_bus.h>
+#include "marlin_platform.h"
+#include "wcn_bus.h"
 
 #define SLP_MGR_HEADER "[slp_mgr]"
 #define SLP_MGR_ERR(fmt, args...)	\
@@ -28,13 +28,9 @@
 #define SLP_MGR_DBG(fmt, args...)	\
 	pr_debug(SLP_MGR_HEADER fmt "\n", ## args)
 
-/* #define SLP_MGR_TEST */
-
 /* cp2 sleep status */
 #define	STAY_SLPING		0
 #define	STAY_AWAKING	1
-
-#define	WAKEUP_RTY_CNT	50
 
 struct slp_mgr_t {
 	struct mutex    drv_slp_lock;

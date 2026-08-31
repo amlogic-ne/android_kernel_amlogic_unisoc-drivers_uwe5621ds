@@ -1,0 +1,111 @@
+#
+# Module name
+#
+ifeq ($(COUSTOM_PLATFORM), unisoc)
+KO_MODULE_NAME := sprdwl_ng_ott
+else
+KO_MODULE_NAME := sprdwl_ng
+endif
+
+$(info "$(KO_MODULE_NAME): $(COUSTOM_PLATFORM)_$(UNISOC_WCN_CHIP_ID)_$(UNISOC_WCN_HW_TYPE)")
+
+#
+# Build Options
+#
+# ------ coustom platform config start ------
+ifeq ($(COUSTOM_PLATFORM), unisoc)
+WIFI_CFLAGS += -DCONFIG_UNISOC_BOARD
+# wifi encryption for wpa3\wapi (default:wpa\wpa2)
+WIFI_CFLAGS += -DCONFIG_ENC_WPA3
+endif
+
+ifeq ($(COUSTOM_PLATFORM), qcom)
+WIFI_CFLAGS += -DCONFIG_QCOM_BOARD
+endif
+
+ifeq ($(COUSTOM_PLATFORM), rk)
+WIFI_CFLAGS += -DCONFIG_RK_BOARD
+endif
+
+ifeq ($(COUSTOM_PLATFORM), mtk)
+WIFI_CFLAGS += -DCONFIG_MTK_BOARD
+endif
+
+ifeq ($(COUSTOM_PLATFORM), nxp)
+ccflags-y += -DCONFIG_THIRD_PARTY_BOARD
+ccflags-y += -DCONFIG_NXP_BOARD
+endif
+
+ifeq ($(COUSTOM_PLATFORM), asr)
+ccflags-y += -DCONFIG_THIRD_PARTY_BOARD
+ccflags-y += -DCONFIG_ASR_BOARD
+endif
+# ------ coustom platform config end ------
+
+# ------ wcn chip id config start ------
+UNISOC_WCN_CHIP_ID_M3E = uwe5621 uwe5623 umw2653
+UNISOC_WCN_CHIP_ID_M3L = uwe5622 umw2652
+
+ifneq ($(filter $(strip $(UNISOC_WCN_CHIP_ID)), $(UNISOC_WCN_CHIP_ID_M3L)),)
+WIFI_CFLAGS += -DCONFIG_UMW2652
+endif
+
+ifneq ($(filter $(strip $(UNISOC_WCN_CHIP_ID)), $(UNISOC_WCN_CHIP_ID_M3E)),)
+WIFI_CFLAGS += -DCONFIG_UMW2653
+endif
+# ------ wcn chip id config end ------
+
+# ------ wcn wifi enc config (default wpa\wpa2) start ------
+# support wpa3
+WIFI_CFLAGS += -DCONFIG_ENC_WPA3
+# ------ wcn wifi enc config end ------
+
+# ------ wcn wifi common macro start ------
+# ifeq ($(strip $(TARGET_BUILD_VARIANT)),userdebug)
+WIFI_CFLAGS += -DCONFIG_SPRD_WCN_DEBUG
+# endif
+# wifi power down when close
+# WIFI_CFLAGS += -DDRV_POWER_DOWN
+# support thirdpary OTT
+WIFI_CFLAGS += -DOTT_UWE
+WIFI_CFLAGS += -DSC2355_FTR -DSC2355_TX_FILTER -DSC2355_QOS_MAP
+WIFI_CFLAGS += -DIBSS_SUPPORT -DIBSS_RSN_SUPPORT
+WIFI_CFLAGS += -DNAN_SUPPORT
+WIFI_CFLAGS += -DRTT_SUPPORT
+WIFI_CFLAGS += -DSC2355_RX_NO_LOOP
+WIFI_CFLAGS += -DACS_SUPPORT -DSC2355_HW_CSUM
+WIFI_CFLAGS += -DWMMAC_WFA_CERTIFICATION
+WIFI_CFLAGS += -DCOMPAT_SAMPILE_CODE
+WIFI_CFLAGS += -DRND_MAC_SUPPORT
+WIFI_CFLAGS += -DSOFTAP_HOOK
+WIFI_CFLAGS += -DATCMD_ASSERT
+WIFI_CFLAGS += -DTCPACK_DELAY_SUPPORT
+WIFI_CFLAGS += -DSPLIT_STACK
+WIFI_CFLAGS += -DDRV_RESET_SELF
+# ------ wcn wifi common macro start ------
+
+# ------ wcn common inclue files start ------
+INCLUDE_CFLAGS += -I$(src)/../unisocwcn/include/
+# ------ wcn common inclue files end ------
+
+# ccflags-y += -Wno-packed-bitfield-compat
+ccflags-y += $(WIFI_CFLAGS)
+ccflags-y += $(INCLUDE_CFLAGS)
+$(info "wcn wifi ccflags-y: $(ccflags-y)")
+
+#
+# Final Objects
+#
+ifeq ($(COUSTOM_PLATFORM), unisoc)
+KBUILD_EXTRA_SYMBOLS = $(BSP_MODULES_OUT)/wcn_bsp_ott/Module.symvers
+else
+KBUILD_EXTRA_SYMBOLS = $(BSP_MODULES_OUT)/$(UNISOC_WCN_CHIP_ID)_bsp_$(UNISOC_WCN_HW_TYPE)/Module.symvers
+endif
+$(info "KBUILD_EXTRA_SYMBOLS: $(KBUILD_EXTRA_SYMBOLS)")
+
+obj-m := $(KO_MODULE_NAME).o
+
+$(KO_MODULE_NAME)-y += $(addprefix sc2355/, api_version.o cfg80211.o cmdevt.o core_sc2355.o debug.o defrag.o \
+						fcc.o ibss.o if_sc2355.o main.o mm.o msg.o nan.o npi.o qos.o reg_domain.o reorder.o \
+						rf_marlin3.o rnd_mac_addr.o rtt.o rx_msg_sc2355.o softap_hook.o tcp_ack.o  \
+						tracer.o tx_msg_sc2355.o txrx.o vendor.o work.o)

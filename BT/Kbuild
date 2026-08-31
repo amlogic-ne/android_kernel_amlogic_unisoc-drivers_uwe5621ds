@@ -1,0 +1,73 @@
+#
+# Module name
+#
+ifeq ($(COUSTOM_PLATFORM), unisoc)
+KO_MODULE_NAME := sprdbt_tty_ott
+else
+KO_MODULE_NAME := sprdbt_tty
+endif
+BT_DEVICE := tty-$(strip $(UNISOC_WCN_HW_TYPE))
+
+$(info "$(KO_MODULE_NAME): $(COUSTOM_PLATFORM)_$(UNISOC_WCN_CHIP_ID)_$(UNISOC_WCN_HW_TYPE)")
+
+#
+# Build Options
+#
+# ------ coustom platform config start ------
+ifeq ($(COUSTOM_PLATFORM), unisoc)
+BT_CFLAGS += -DCONFIG_UNISOC_BOARD
+endif
+
+ifeq ($(COUSTOM_PLATFORM), qcom)
+BT_CFLAGS += -DCONFIG_QCOM_BOARD
+endif
+
+ifeq ($(COUSTOM_PLATFORM), rk)
+BT_CFLAGS += -DCONFIG_RK_BOARD
+endif
+
+ifeq ($(COUSTOM_PLATFORM), mtk)
+BT_CFLAGS += -DCONFIG_MTK_BOARD
+endif
+# ------ coustom platform config end ------
+
+# ------ wcn bt common macro start ------
+# CONFIG_WCN_BT_WAKE_HOST = y
+ifeq ($(CONFIG_WCN_BT_WAKE_HOST), y)
+BT_CFLAGS += -DWOBLE_TYPE="\"demo\""
+BT_CFLAGS += -DCONFIG_WCN_BT_WAKE_HOST
+endif
+# ------ wcn bt common macro end ------
+
+# ------ wcn common inclue files start ------
+INCLUDE_CFLAGS += -I$(src)/../../wlan_drv/unisocwcn/include/
+# ------ wcn common inclue files end ------
+
+ccflags-y +=  -Wno-uninitialized -Wno-implicit-fallthrough
+
+ccflags-y += $(BT_CFLAGS)
+ccflags-y += $(INCLUDE_CFLAGS)
+$(info "wcn wifi ccflags-y: $(ccflags-y)")
+
+#
+# Final Objects
+#
+ifeq ($(COUSTOM_PLATFORM), unisoc)
+KBUILD_EXTRA_SYMBOLS = $(BSP_MODULES_OUT)/wcn_bsp_ott/Module.symvers
+else
+KBUILD_EXTRA_SYMBOLS = $(BSP_MODULES_OUT)/$(UNISOC_WCN_CHIP_ID)_bsp_$(UNISOC_WCN_HW_TYPE)/Module.symvers
+endif
+$(info "KBUILD_EXTRA_SYMBOLS: $(KBUILD_EXTRA_SYMBOLS)")
+
+obj-m := $(KO_MODULE_NAME).o
+
+ifeq ($(strip $(UNISOC_WCN_HW_TYPE)), sdio)
+$(KO_MODULE_NAME)-y += $(addprefix $(BT_DEVICE)/, tty.o rfkill.o lpm.o dump.o)
+$(KO_MODULE_NAME)-y += $(BT_DEVICE)/alignment/sitm.o
+$(KO_MODULE_NAME)-$(CONFIG_WCN_BT_WAKE_HOST) += $(addprefix $(BT_DEVICE)/,woble.o)
+endif
+
+ifeq ($(strip $(UNISOC_WCN_HW_TYPE)), usb)
+$(KO_MODULE_NAME)-y += $(addprefix $(BT_DEVICE)/, tty.o rfkill.o lpm.o)
+$(KO_MODULE_NAME)-y += $(BT_DEVICE)/alignment/sitm.o
+endif

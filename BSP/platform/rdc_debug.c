@@ -3,11 +3,12 @@
 #include <linux/kthread.h>
 #include <linux/version.h>
 #include <linux/vmalloc.h>
-#include <marlin_platform.h>
+#include "marlin_platform.h"
 
 #include "mdbg_type.h"
 #include "rdc_debug.h"
 #include "wcn_txrx.h"
+#include "../include/wcn_dbg.h"
 
 #define WCN_DEBUG_RETRY_TIMES	1
 #define WCN_DEBUG_MAX_PATH_LEN	110
@@ -94,9 +95,16 @@ static int wcn_mkdir(char *path)
 static int wcn_find_cp2_file_num(char *path, loff_t *pos)
 {
 	int i;
-	struct kstat config_stat;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
 	mm_segment_t fs_old;
+#endif
+
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0))
+	struct kstat config_stat;
 	int ret = 0;
+#else
+	struct file *filep = NULL;
+#endif
 	/*first file whose size less than wcn_cp2_log_limit_size*/
 	int first_small_file = 0;
 	char first_file_set = 0;
@@ -106,17 +114,34 @@ static int wcn_find_cp2_file_num(char *path, loff_t *pos)
 	int num = 0;
 	int exist_file_num = 0;
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	fs_old = force_uaccess_begin();
+#else
 	fs_old = get_fs();
 	set_fs(KERNEL_DS);
+#endif
+#endif
 
 	if (wcn_cp2_log_cover_old) {
 		for (i = 0; i < wcn_cp2_file_max_num; i++) {
 			sprintf(wcn_cp2_file_path, path, i);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
 			ret = vfs_stat(wcn_cp2_file_path, &config_stat);
 			if (ret)
 				break;
 			exist_file_num++;
 			config_size = (int)config_stat.size;
+#else
+			filep = filp_open(wcn_cp2_file_path, O_RDONLY, 0);
+			if (IS_ERR(filep)) {
+				WCN_INFO("%s: Failed to open the file %s \n", __FUNCTION__, wcn_cp2_file_path);
+				continue;;
+			}
+			config_size = i_size_read(file_inode(filep));
+            WCN_INFO("%s: config_size= %d \n", __FUNCTION__, config_size);
+			filp_close(filep, NULL);
+#endif
 			if ((config_size < wcn_cp2_log_limit_size) &&
 				(first_file_set == 0)) {
 				first_small_file = i;
@@ -172,7 +197,13 @@ static int wcn_find_cp2_file_num(char *path, loff_t *pos)
 		} else
 			filp_close(fp, NULL);
 	}
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	force_uaccess_end(fs_old);
+#else
 	set_fs(fs_old);
+#endif
+#endif
 	return num;
 }
 
@@ -438,11 +469,17 @@ static void wcn_config_log_file(void)
 {
 	struct file *filp;
 	loff_t offset = 0;
-	struct kstat config_stat;
 	int config_size = 0;
 	int read_len = 0;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
 	mm_segment_t fs_old;
+#endif
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0))
+	struct kstat config_stat;
 	int ret;
+#else
+	struct file *filep = NULL;
+#endif
 	char *buf;
 	char *buf_end;
 	char *limit_size = "wcn_cp2_log_limit_size=";
@@ -454,9 +491,16 @@ static void wcn_config_log_file(void)
 	int config_max_num = 0;
 	int index = 0;
 
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	fs_old = force_uaccess_begin();
+#else
 	fs_old = get_fs();
 	set_fs(KERNEL_DS);
+#endif
+#endif
 	for (index = 0; index < WCN_DEBUG_CFG_MAX_PATH_NUM; index++) {
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0))
 		ret = vfs_stat(wcn_cp2_config_path[index], &config_stat);
 		if (!ret) {
 			config_size = (int)config_stat.size;
@@ -465,8 +509,31 @@ static void wcn_config_log_file(void)
 				 config_size);
 			break;
 		}
+#else
+	filep = filp_open(wcn_cp2_config_path[index], O_RDONLY, 0);
+	if (IS_ERR(filep)) {
+		WCN_INFO("%s: Failed to open the file %s \n", __FUNCTION__, wcn_cp2_config_path[index]);
+		continue;;
 	}
+	config_size = i_size_read(file_inode(filep));
+	filp_close(filep, NULL);
+    WCN_INFO("%s: config_size= %d \n", __FUNCTION__, config_size);
+
+	if (config_size > 0) {
+		WCN_INFO("%s: find config file:%s size:%d\n",
+				__func__, wcn_cp2_config_path[index],
+				config_size);
+		break;
+	}
+#endif
+	}
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5, 17, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	force_uaccess_end(fs_old);
+#else
 	set_fs(fs_old);
+#endif
+#endif
 	if (index == WCN_DEBUG_CFG_MAX_PATH_NUM) {
 		WCN_INFO("%s: there is no unisoc_cp2log_config.txt\n",
 			 __func__);
@@ -584,7 +651,7 @@ int wcn_debug_init(void)
 	int ret = 0;
 	unsigned char i;
 
-	WCN_DEBUG("%s entry\n", __func__);
+	WCN_INFO("%s entry\n", __func__);
 
 	/* config cp2 log if there is a config file.*/
 	if (config_inited == 0) {

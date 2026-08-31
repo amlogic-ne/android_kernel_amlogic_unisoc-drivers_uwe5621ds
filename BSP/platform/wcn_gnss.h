@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Spreadtrum Communications Inc.
+ * Copyright (C) 2018 Spreadtrum Communications Inc.
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
  * may be copied, distributed, and modified under those terms.
@@ -25,6 +25,7 @@ struct sprdwcn_gnss_ops {
 	int (*wait_gnss_boot)(void);
 };
 #endif
+
 int wcn_gnss_ops_register(struct sprdwcn_gnss_ops *ops);
 void wcn_gnss_ops_unregister(void);
 

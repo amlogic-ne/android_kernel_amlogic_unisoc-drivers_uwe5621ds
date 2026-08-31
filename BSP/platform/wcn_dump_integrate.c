@@ -13,6 +13,8 @@
 #include "wcn_glb.h"
 #include "wcn_log.h"
 #include "wcn_misc.h"
+#include "mdbg_type.h"
+#include "../include/wcn_dbg.h"
 
 /* units is ms, 2500ms */
 #define WCN_DUMP_TIMEOUT 2500
@@ -136,9 +138,9 @@ struct wcn_dump_head_info {
 	struct wcn_dump_section_info section[0];
 } __packed;
 
-static int wcn_fill_dump_head_info(struct wcn_dump_mem_reg *mem_cfg, int cnt)
+static int wcn_fill_dump_head_info(struct wcn_dump_mem_reg *mem_cfg, size_t cnt)
 {
-	int i, len, head_len;
+	unsigned int i, len, head_len;
 	struct wcn_dump_mem_reg *mem;
 	struct wcn_dump_head_info *head;
 	struct wcn_dump_section_info *sec;
@@ -151,9 +153,9 @@ static int wcn_fill_dump_head_info(struct wcn_dump_mem_reg *mem_cfg, int cnt)
 	}
 
 	strncpy(head->version, WCN_DUMP_VERSION_NAME,
-		strlen(WCN_DUMP_VERSION_NAME)+1);
+		strlen(WCN_DUMP_VERSION_NAME) + 1);
 	strncpy(head->sub_version, WCN_DUMP_VERSION_SUB_NAME,
-		strlen(WCN_DUMP_VERSION_SUB_NAME)+1);
+		strlen(WCN_DUMP_VERSION_SUB_NAME) + 1);
 	head->n_sec = cpu_to_le32(cnt);
 	len = head_len;
 	for (i = 0; i < cnt; i++) {
@@ -245,7 +247,7 @@ static int mdbg_dump_cp_register_data(u32 addr, u32 len)
 
 static void mdbg_dump_ap_register(struct wcn_dump_mem_reg *mem)
 {
-	int i;
+	u32 i;
 
 	for (i = WCN_DUMP_AP_REGS_START; i <= WCN_DUMP_AP_REGS_END; i++) {
 		mdbg_dump_ap_register_data(mem[i].addr, mem[i].len);
@@ -255,7 +257,8 @@ static void mdbg_dump_ap_register(struct wcn_dump_mem_reg *mem)
 
 static void mdbg_dump_cp_register(struct wcn_dump_mem_reg *mem)
 {
-	int i, count;
+	u32 i;
+	int count;
 
 	for (i = WCN_DUMP_CP2_REGS_START; i <= WCN_DUMP_CP2_REGS_END; i++) {
 		count = mdbg_dump_cp_register_data(mem[i].addr, mem[i].len);
@@ -265,7 +268,8 @@ static void mdbg_dump_cp_register(struct wcn_dump_mem_reg *mem)
 
 static void mdbg_dump_iram(struct wcn_dump_mem_reg *mem)
 {
-	int i, count;
+	u32 i;
+	int count;
 
 	for (i = WCN_DUMP_CP2_IRAM_START; i <= WCN_DUMP_CP2_IRAM_END; i++) {
 		count = mdbg_dump_cp_register_data(mem[i].addr, mem[i].len);
@@ -296,8 +300,8 @@ static int mdbg_dump_share_memory(struct wcn_dump_mem_reg *mem)
 		return -1;
 	}
 	count = 0;
-	/* 10s timeout */
-	timeout = jiffies + msecs_to_jiffies(10000);
+	/* 20s timeout */
+	timeout = jiffies + msecs_to_jiffies(20000);
 	while (count < len) {
 		trans_size = (len - count) > DUMP_PACKET_SIZE ?
 			DUMP_PACKET_SIZE : (len - count);
@@ -348,6 +352,8 @@ static int btwf_dump_mem(void)
 	mdev_ring = mdbg_dev->ring_dev->ring;
 	mdbg_hold_cpu();
 	msleep(100);
+	if (wcn_platform_chip_type() == WCN_PLATFORM_TYPE_SHARKLE)
+		wcn_check_btwfcp_dcache_flushed();
 	mdbg_ring_reset(mdev_ring);
 	mdbg_atcmd_clean();
 	if (wcn_fill_dump_head_info(s_wcn_dump_regs,

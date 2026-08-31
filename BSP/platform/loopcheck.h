@@ -1,9 +1,6 @@
-#ifndef _LOOPCHECK
-#define _LOOPCHECK
+#ifndef _LOOPCHECK_H_
+#define _LOOPCHECK_H_
 
-void switch_cp2_log(bool flag);
-int get_board_ant_num(void);
-void get_cp2_version(void);
 void start_loopcheck(void);
 void stop_loopcheck(void);
 int loopcheck_init(void);

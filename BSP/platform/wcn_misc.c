@@ -18,18 +18,20 @@
 #include <linux/mutex.h>
 #include <linux/version.h>
 #include <linux/time.h>
-#include <wcn_wrapper.h>
 #if KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE
 #include <linux/sched/clock.h>
 #endif
+#include "marlin_platform.h"
 
 #include "wcn_misc.h"
 #include "wcn_procfs.h"
 #include "wcn_txrx.h"
 #include "mdbg_type.h"
+#include "../include/wcn_dbg.h"
 
 static struct atcmd_fifo s_atcmd_owner;
-static unsigned long int s_marlin_bootup_time;
+static struct wcn_tm tm;
+static unsigned long long s_marlin_bootup_time;
 
 void mdbg_atcmd_owner_init(void)
 {
@@ -59,7 +61,7 @@ enum atcmd_owner mdbg_atcmd_owner_peek(void)
 	s_atcmd_owner.head++;
 	mutex_unlock(&s_atcmd_owner.lock);
 
-	WCN_DEBUG("owner=%d, head=%d\n", owner, s_atcmd_owner.head-1);
+	WCN_INFO("owner=%d, head=%d\n", owner, s_atcmd_owner.head - 1);
 	return owner;
 }
 
@@ -67,7 +69,8 @@ void mdbg_atcmd_clean(void)
 {
 	mutex_lock(&s_atcmd_owner.lock);
 	memset(&s_atcmd_owner.owner[0], 0, ARRAY_SIZE(s_atcmd_owner.owner));
-	s_atcmd_owner.head = s_atcmd_owner.tail = 0;
+	s_atcmd_owner.tail = 0;
+	s_atcmd_owner.head = 0;
 	mutex_unlock(&s_atcmd_owner.lock);
 }
 
@@ -84,7 +87,7 @@ void mdbg_atcmd_clean(void)
  * We'd better send all of the ATCMD with this function
  * or caused WCND error
  */
-long int mdbg_send_atcmd(char *buf, long int len, enum atcmd_owner owner)
+long int mdbg_send_atcmd(char *buf, size_t len, enum atcmd_owner owner)
 {
 	long int sent_size = 0;
 
@@ -95,30 +98,48 @@ long int mdbg_send_atcmd(char *buf, long int len, enum atcmd_owner owner)
 	sent_size = mdbg_send(buf, len, MDBG_SUBTYPE_AT);
 	mutex_unlock(&s_atcmd_owner.lock);
 
-	WCN_DEBUG("%s, owner=%d\n", buf, owner);
+	WCN_INFO("%s, owner=%d\n", buf, owner);
 
 	return sent_size;
 }
 
 /* copy from function: kdb_gmtime */
 #if KERNEL_VERSION(4, 20, 0) <= LINUX_VERSION_CODE
-static void wcn_gmtime(struct timespec64 *tv, struct wcn_tm *tm){
+static void wcn_gmtime(struct timespec64 *tv, struct wcn_tm *tm)
 #else
-static void wcn_gmtime(struct timespec *tv, struct wcn_tm *tm){
+static void wcn_gmtime(struct timespec *tv, struct wcn_tm *tm)
 #endif
+{
 	/* This will work from 1970-2099, 2100 is not a leap year */
 	static int mon_day[] = { 31, 29, 31, 30, 31, 30, 31,
 				 31, 30, 31, 30, 31 };
+#ifdef CONFIG_ASR_BOARD
+	uint64_t ts;
+#endif
+
 	memset(tm, 0, sizeof(*tm));
-	tm->tm_msec =  tv->tv_nsec/1000000;
+#ifdef CONFIG_ASR_BOARD
+	ts = tv->tv_nsec ;
+	do_div( ts , 1000000 );
+	tm->tm_msec =  (long)ts;
+	ts = tv->tv_sec;
+	tm->tm_sec  = do_div( ts , (24 * 60 * 60));
+	tm->tm_mday = ts + (2 * 365 + 1);
+	// tm->tm_sec  = tv->tv_sec % (24 * 60 * 60);
+	// tm->tm_mday = tv->tv_sec / (24 * 60 * 60) +
+	// 	(2 * 365 + 1); /* shift base from 1970 to 1968 */
+#else
+	tm->tm_msec =  tv->tv_nsec / 1000000;
 	tm->tm_sec  = tv->tv_sec % (24 * 60 * 60);
 	tm->tm_mday = tv->tv_sec / (24 * 60 * 60) +
 		(2 * 365 + 1); /* shift base from 1970 to 1968 */
+#endif
+	pr_debug("tm_msec = %ld ,tm_sec= %ld ,tm_mday= %ld" , tm->tm_msec , tm->tm_sec , tm->tm_mday);
 	tm->tm_min =  tm->tm_sec / 60 % 60;
 	tm->tm_hour = tm->tm_sec / 60 / 60;
 	tm->tm_sec =  tm->tm_sec % 60;
-	tm->tm_year = 68 + 4*(tm->tm_mday / (4*365+1));
-	tm->tm_mday %= (4*365+1);
+	tm->tm_year = 68 + 4 * (tm->tm_mday / (4 * 365 + 1));
+	tm->tm_mday %= (4 * 365 + 1);
 	mon_day[1] = 29;
 	while (tm->tm_mday >= mon_day[tm->tm_mon]) {
 		tm->tm_mday -= mon_day[tm->tm_mon];
@@ -131,17 +152,14 @@ static void wcn_gmtime(struct timespec *tv, struct wcn_tm *tm){
 	++tm->tm_mday;
 }
 
-/* AP notify BTWF time by at+aptime=... cmd */
-long int wcn_ap_notify_btwf_time(void)
+char *wcn_get_kernel_time(void)
 {
 #if KERNEL_VERSION(4, 20, 0) <= LINUX_VERSION_CODE
 	struct timespec64 now;
 #else
 	struct timespec now;
 #endif
-	struct wcn_tm tm;
-	char aptime[64];
-	long int send_cnt = 0;
+	static char aptime[64];
 
 	/* get ap kernel time and transfer to China-BeiJing Time */
 #if KERNEL_VERSION(4, 20, 0) <= LINUX_VERSION_CODE
@@ -154,13 +172,24 @@ long int wcn_ap_notify_btwf_time(void)
 
 	/* save time with string: month,day,hour,min,sec,mili-sec */
 	memset(aptime, 0, 64);
-	sprintf(aptime, "at+aptime=%d,%d,%d,%d,%d,%d\r",
-		tm.tm_mon+1, tm.tm_mday,
+	sprintf(aptime, "at+aptime=%ld,%ld,%ld,%ld,%ld,%ld\r\n",
+		tm.tm_mon + 1, tm.tm_mday,
 		tm.tm_hour, tm.tm_min, tm.tm_sec, tm.tm_msec);
+
+	return aptime;
+}
+
+/* AP notify BTWF time by at+aptime=... cmd */
+long int wcn_ap_notify_btwf_time(void)
+{
+	char *aptime;
+	long int send_cnt = 0;
+
+	aptime = wcn_get_kernel_time();
 
 	/* send to BTWF CP2 */
 	send_cnt = mdbg_send_atcmd((void *)aptime, strlen(aptime),
-		   WCN_ATCMD_KERNEL);
+				   WCN_ATCMD_KERNEL);
 	WCN_INFO("%s, send_cnt=%ld", aptime, send_cnt);
 
 	return send_cnt;
@@ -176,12 +205,11 @@ long int wcn_ap_notify_btwf_time(void)
 void marlin_bootup_time_update(void)
 {
 	s_marlin_bootup_time = local_clock();
-	WCN_INFO("s_marlin_bootup_time=%ld",
-		s_marlin_bootup_time);
+	WCN_INFO("s_marlin_bootup_time=%llu",
+		 s_marlin_bootup_time);
 }
 
-unsigned long int marlin_bootup_time_get(void)
+unsigned long long marlin_bootup_time_get(void)
 {
 	return s_marlin_bootup_time;
 }
-

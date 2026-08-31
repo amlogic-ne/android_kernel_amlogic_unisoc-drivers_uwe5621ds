@@ -10,17 +10,17 @@
  * GNU General Public License for more details.
  */
 
+
 #ifndef __WCN_TXRX_H__
 #define __WCN_TXRX_H__
+#include <linux/device.h>
 #include <linux/interrupt.h>
 #include <linux/mutex.h>
 #include <linux/sched.h>
 #include <linux/types.h>
-#include <linux/version.h>
 #include <linux/wait.h>
 
-#include "mdbg_type.h"
-#include <wcn_bus.h>
+#include "wcn_bus.h"
 
 #define SMP_HEADERFLAG 0X7E7E7E7E
 #define SMP_RESERVEDFLAG 0X5A5A
@@ -47,9 +47,7 @@ struct ring_rx_data {
 
 struct ring_device {
 	struct mdbg_ring_t	*ring;
-	/*wakeup_source pointer*/
 	struct wakeup_source	*rw_wake_lock;
-
 	spinlock_t		rw_lock;
 	struct mutex mdbg_read_mutex;
 	struct list_head	rx_head;
@@ -81,16 +79,7 @@ enum smp_diag_subtype_t {
 
 #define WCNBUS_TX 1
 #define WCNBUS_RX 0
-#ifdef CONFIG_WCN_SIPC
-enum wcnbus_channel_t {
-	WCN_AT_TX = 0,
-	WCN_LOOPCHECK_RX = 2,
-	WCN_AT_RX = 1,
-	WCN_ASSERT_RX = 3,
-	WCN_RING_RX = 4,
-	WCN_RSV_RX,
-};
-#elif defined(CONFIG_WCN_USB)
+#ifdef CONFIG_WCN_USB
 enum wcnbus_channel_t {
 	WCN_AT_TX = 7,
 	WCN_LOOPCHECK_RX = 29,
@@ -130,10 +119,12 @@ enum {
 
 extern struct mchn_ops_t mdbg_proc_ops[MDBG_ASSERT_RX_OPS + 1];
 
+void mdbg_pt_ring_reg(void);
+void mdbg_pt_ring_unreg(void);
 int mdbg_ring_init(void);
 void mdbg_ring_remove(void);
-long int mdbg_send(char *buf, long int len, unsigned int subtype);
-long int mdbg_receive(void *buf, long int len);
+long int mdbg_send(char *buf, size_t len, unsigned int subtype);
+long int mdbg_receive(void *buf, int len);
 int mdbg_tx_cb(int channel, struct mbuf_t *head,
 	       struct mbuf_t *tail, int num);
 int mdbg_tx_power_notify(int chn, int flag);

@@ -44,7 +44,8 @@ enum ADDR_REGION_TYPE {
 
 #define GET_32_OF_40(a) ((unsigned int)((unsigned long)	\
 				(mpool_vir_to_phy(a)) & 0xFFFFFFFF))
-#define GET_8_OF_40(a) (0x80)
+#define GET_8_OF_40(a)	((unsigned char) \
+			((((unsigned long)a >> 32) & 0xff) | 0x80))
 #define SET_32_OF_40(a, v) do {	\
 	unsigned long l = (unsigned long)(a);	\
 	if (sizeof(unsigned long) == sizeof(unsigned int)) {	\
@@ -377,12 +378,112 @@ struct edma_info {
 		struct msg_q q;
 	} isr_func;
 	struct wcn_pcie_info *pcie_info;
+	struct wakeup_source edma_push_ws;
+	struct wakeup_source edma_pop_ws;
+	struct timer_list edma_tx_timer;
+	unsigned long cur_chn_status;
+	struct mutex mpool_lock;
+	spinlock_t tasklet_lock;
 };
+
+#define DMA_PAUSE			(EDMA_GLB_REG_BASE + 0x0)
+#define DMA_INT_RAW_STATUS		(EDMA_GLB_REG_BASE + 0x4)
+#define DMA_INT_MASK_STATUS		(EDMA_GLB_REG_BASE + 0x8)
+#define DMA_REQ_STATUS			(EDMA_GLB_REG_BASE + 0xc)
+#define DMA_DEBUG_STATUS		(EDMA_GLB_REG_BASE + 0x10)
+#define DMA_ARB_SEL_STATUS		(EDMA_GLB_REG_BASE + 0x14)
+#define DMA_CHN_ARPROT			(EDMA_GLB_REG_BASE + 0x20)
+#define DMA_CHN_AWPROT			(EDMA_GLB_REG_BASE + 0x24)
+#define DMA_CHN_PROT_FLAG		(EDMA_GLB_REG_BASE + 0x28)
+#define DMA_GLB_PROT			(EDMA_GLB_REG_BASE + 0x2c)
+#define DMA_REQ_CID_PROT		(EDMA_GLB_REG_BASE + 0x30)
+#define DMA_SYNC_SEC_NORMAL		(EDMA_GLB_REG_BASE + 0x34)
+#define DMA_PCIE_MSIX_REG_ADDR_LO	(EDMA_GLB_REG_BASE + 0x38)
+#define DMA_PCIE_MSIX_VALUE		(EDMA_GLB_REG_BASE + 0x3c)
+/***********************************************************/
+#define CHN_DMA_INT(n)			(EDMA_CHN_REG_BASE + n * 0x40)
+
+#define RF_CHN_TX_POP_INT_EN_BIT		BIT(0)
+#define RF_CHN_TX_COMPLETE_INT_EN_BIT		BIT(1)
+#define RF_CHN_RX_POP_INT_EN_BIT		BIT(2)
+#define RF_CHN_RX_PUSH_INT_EN_BIT		BIT(3)
+#define RF_CHN_CFG_ERR_INT_EN_BIT		BIT(4)
+/* RO register */
+#define RF_CHN_TX_POP_INT_RAW_STATUS_BIT	BIT(8)
+#define RF_CHN_TX_COMPLETE_INT_RAW_STATUS_BIT	BIT(9)
+#define RF_CHN_RX_POP_INT_RAW_STATUS_BIT	BIT(10)
+#define RF_CHN_RX_PUSH_INT_RAW_STATUS_BIT	BIT(11)
+#define RF_CHN_CFG_ERR_INT_RAW_STATUS_BIT	BIT(12)
+
+#define RF_CHN_TX_POP_INT_MASK_STATUS_BIT	BIT(16)
+#define RF_CHN_TX_COMPLETE_INT_MASK_STATUS_BIT	BIT(17)
+#define RF_CHN_RX_POP_INT_MASK_STATUS_BIT	BIT(18)
+#define RF_CHN_RX_PUSH_INT_MASK_STATUS_BIT	BIT(19)
+#define RF_CHN_CFG_ERR_INT_MASK_STATUS_BIT	BIT(20)
+/* WC register */
+#define RF_CHN_TX_POP_INT_CLR_BIT		BIT(24)
+#define RF_CHN_TX_COMPLETE_INT_CLR_BIT		BIT(25)
+#define RF_CHN_RX_POP_INT_CLR_BIT		BIT(26)
+#define RF_CHN_RX_PUSH_INT_CLR_BIT		BIT(27)
+#define RF_CHN_CFG_ERR_INT_CLR_BIT		BIT(28)
+
+/***********************************************************/
+#define CHN_DMA_TX_REQ(n)		(EDMA_CHN_REG_BASE + 0x4 + n * 0x40)
+
+#define RF_CHN_TX_REQ_BIT		BIT(0)
+/***********************************************************/
+#define CHN_DMA_RX_REQ(n)		(EDMA_CHN_REG_BASE + 0x8 + n * 0x40)
+
+#define RF_CHN_RX_REQ_BIT		BIT(0)
+/***********************************************************/
+#define CHN_DMA_CFG(n)			(EDMA_CHN_REG_BASE + 0xc + n * 0x40)
+
+#define RF_CHN_EB_BIT			BIT(0)
+#define RF_CHN_LIST_MODE_BIT		(BIT(4) | BIT(5))
+#define RF_CHN_INT_TO_AP_TYPE_BIT	BIT(6)
+#define RF_CHN_DIR_BIT			BIT(7)
+#define RF_CHN_SWT_MODE_BIT		(BIT(8) | BIT(9))
+#define RF_CHN_PRIORITY_BIT		(BIT(10) | BIT(11))
+#define RF_DONT_WAIT_BDONE_BIT		BIT(12)
+#define RF_CHN_REQ_MODE_BIT		BIT(13)
+#define RF_CHN_INT_OUT_SEL_BIT		BIT(14)
+#define RF_CHN_SEM_VALUE_BIT \
+	(BIT(16) | BIT(17) | BIT(18) | BIT(19) | \
+	 BIT(20) | BIT(21) | BIT(22) | BIT(23))
+#define RF_CHN_ERR_STATUS_BIT		(BIT(24) | BIT(25) | BIT(26))
+/*
+ * bit24 = 1 : trans len is 0
+ * bit25 = 1 : AXI read channel error
+ * bit26 = 1 : AXI write channel error
+ */
+#define RF_CHN_MSI_INT_MAP_BIT		(BIT(27) | BIT(28) | BIT(29) | BIT(30))
+/***********************************************************/
+#define CHN_TRANS_LEN(n)		(EDMA_CHN_REG_BASE + 0x10 + n * 0x40)
+
+#define RF_CHN_TRSC_LEN_BIT		0xFFFF
+#define RF_CHN_DONE_BIT			BIT(24)
+#define RF_CHN_PAUSE_BIT		BIT(25)
+#define RF_CHN_TX_INTR_BIT		BIT(26)
+#define RF_CHN_RX_INTR_BIT		BIT(27)
+#define RF_CHN_EOF_BIT			BIT(28)
+/***********************************************************/
+#define CHN_PTR_HIGH(n)			(EDMA_CHN_REG_BASE + 0x14 + n * 0x40)
+
+#define RF_CHN_RX_NEXT_DSCR_PTR_HIGH_BIT	0xFF000000
+#define RF_CHN_TX_NEXT_DSCR_PTR_HIGH_BIT	0x00FF0000
+#define RF_CHN_DST_DATA_ADDR_HIGH_BIT		0x0000FF00
+#define RF_CHN_SRC_DATA_ADDR_HIGH_BIT		0x000000FF
+/***********************************************************/
+#define CHN_TX_NEXT_DSCR_PTR_LOW(n)	(EDMA_CHN_REG_BASE + 0x18 + n * 0x40)
+#define CHN_RX_NEXT_DSCR_PTR_LOW(n)	(EDMA_CHN_REG_BASE + 0x1c + n * 0x40)
+#define CHN_DATA_SRC_ADDR_LOW(n)	(EDMA_CHN_REG_BASE + 0x20 + n * 0x40)
+#define CHN_DATA_DEST_ADDR_LOW(n)	(EDMA_CHN_REG_BASE + 0x24 + n * 0x40)
 
 int edma_init(struct wcn_pcie_info *pcie_info);
 int edma_deinit(void);
 
 int edma_chn_init(int chn, int mode, int inout, int max_trans);
+int edma_chn_deinit(int chn);
 int edma_one_link_dscr_buf_bind(struct desc *dscr, unsigned char *dst,
 				       unsigned char *src, unsigned short len);
 struct edma_info *edma_info(void);
@@ -400,4 +501,10 @@ void *mpool_malloc(int len);
 int mpool_free(void);
 void *pcie_alloc_memory(int len);
 int delete_queue(struct msg_q *q);
+int edma_hw_pause(void);
+int edma_hw_restore(void);
+int edma_dump_chn_reg(int chn);
+int edma_dump_glb_reg(void);
+void edma_del_tx_timer(void);
+int edma_tasklet_deinit(void);
 #endif

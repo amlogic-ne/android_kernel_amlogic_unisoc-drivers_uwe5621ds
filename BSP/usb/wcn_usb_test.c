@@ -3,6 +3,7 @@
 #include <linux/kthread.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
+#include <linux/version.h>
 #include <linux/string.h>
 #include <linux/timekeeping.h>
 #include <linux/time.h>
@@ -61,7 +62,11 @@ static int wcn_usb_channel_open(struct inode *inode, struct file *file)
 {
 	struct channel *channel;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 17, 0)
+	channel = (struct channel *)pde_data(inode);
+#else
 	channel = (struct channel *)PDE_DATA(inode);
+#endif
 
 	if (!channel)
 		return -EIO;
@@ -228,6 +233,15 @@ static ssize_t wcn_usb_channel_write(struct file *file, const char *buffer,
 	return buf_offset;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+static const struct proc_ops wcn_usb_channel_fops = {
+	.proc_read = wcn_usb_channel_read,
+	.proc_write = wcn_usb_channel_write,
+	.proc_open = wcn_usb_channel_open,
+	.proc_release = wcn_usb_channel_release,
+	.proc_lseek = noop_llseek,
+};
+#else
 static const struct file_operations wcn_usb_channel_fops = {
 	.owner = THIS_MODULE,
 	.read = wcn_usb_channel_read,
@@ -236,23 +250,35 @@ static const struct file_operations wcn_usb_channel_fops = {
 	.release = wcn_usb_channel_release,
 	.llseek = noop_llseek,
 };
+#endif
 
 int calculate_throughput(int channel_id, struct mbuf_t *head,
 		struct mbuf_t *tail, int num)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+	static struct timespec64 tm_begin;
+	struct timespec64 tm_end;
+#else
 	static struct timespec tm_begin;
 	struct timespec tm_end;
+#endif
 	static int time_count;
 	unsigned long time_total_ns;
 	struct mbuf_t *mbuf;
 	int i;
 
-	if (time_count == 0)
+	if (time_count == 0){
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+		ktime_get_real_ts64(&tm_begin);
+#else
 		getnstimeofday(&tm_begin);
+#endif
+	}
 
 	if (!num)
 		return 0;
 
+	// wcn_usb_test_print("%s channel_id = %d \n", __func__,channel_id);
 
 	if (get_channel_dir(channel_id) &&
 	    (chnmg_find_channel(this_chnmg, channel_id)->status)) {
@@ -269,10 +295,16 @@ int calculate_throughput(int channel_id, struct mbuf_t *head,
 		wcn_usb_test_print("%s push list error\n", __func__);
 
 	time_count += num;
-	if (time_count >= 1000) {
+	if (time_count >= 10000) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+		ktime_get_real_ts64(&tm_end);
+		time_total_ns = timespec64_to_ns(&tm_end)
+		- timespec64_to_ns(&tm_begin);
+#else
 		getnstimeofday(&tm_end);
 		time_total_ns = timespec_to_ns(&tm_end)
-			- timespec_to_ns(&tm_begin);
+		- timespec_to_ns(&tm_begin);
+#endif
 		wcn_usb_test_print("%s avg time[%ld] in [%d]\n",
 				__func__, time_total_ns, time_count);
 		time_count = 0;
@@ -467,7 +499,11 @@ static int wcn_usb_chnmg_open(struct inode *inode, struct file *file)
 {
 	struct chnmg *chnmg;
 	/* get channel_list head */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 17, 0)
+	chnmg = (struct chnmg *)pde_data(inode);
+#else
 	chnmg = (struct chnmg *)PDE_DATA(inode);
+#endif
 
 	file->private_data = chnmg;
 	return 0;
@@ -631,7 +667,7 @@ static int wcn_usb_test_tp(struct chnmg *chnmg, struct usb_test_cmd_desc *cmd)
 }
 
 static int channel_loopback_enable[] = {3, 4, 5, 6};
-static void *tx_buf[10];
+static void *tx_buf[16];
 static int checkdata_loopback_rx(int channel_id, struct mbuf_t *head,
 		struct mbuf_t *tail, int num)
 {
@@ -640,6 +676,7 @@ static int checkdata_loopback_rx(int channel_id, struct mbuf_t *head,
 	struct mbuf_t *mbuf;
 	int rx_head;
 	int ret;
+	static int time_count;
 
 	if (!channel || channel->status) {
 		sprdwcn_bus_list_free(channel_id, head, tail, num);
@@ -647,18 +684,33 @@ static int checkdata_loopback_rx(int channel_id, struct mbuf_t *head,
 	}
 	mutex_lock(&channel->pool_lock);
 	rx_head = channel->lp_rx_head;
+
 	channel->lp_rx_head = rx_head + num;
 	mutex_unlock(&channel->pool_lock);
 
 	mbuf_list_iter(head, num, mbuf, i) {
 		int j;
+		int len;
 		char *check_buf = tx_buf[(i + rx_head) % ARRAY_SIZE(tx_buf)];
-
-		for (j = 0; j < mbuf->len; j++) {
-			if (((char *)mbuf->buf)[j] != check_buf[j])
-				wcn_usb_test_print("%s check is not ok!\n",
-						   __func__);
+	
+		if (channel_id == 22) {
+			len = 1600;
+		} else {
+			len = mbuf->len;
 		}
+		for (j = 0; j < len; j++) {
+			if (((char *)mbuf->buf)[j] != check_buf[j]) {
+				 wcn_usb_test_print("%s %x %x j = %d check is not ok!\n",
+						   __func__,((char *)mbuf->buf)[j],check_buf[j],j);
+				return 0;
+			}
+		}
+	}
+	time_count += num;
+	// wcn_usb_test_print("%s time_count = %d\n", __func__,time_count);
+	if (time_count > 10000) {
+		wcn_usb_test_print("%s loopback rx success time_count = %d\n", __func__, time_count);
+		time_count = 0;
 	}
 	ret = sprdwcn_bus_push_list(channel_id, head, tail, num);
 	return ret;
@@ -689,7 +741,7 @@ static int checkdata_loopback_tx(int channel_id, struct mbuf_t *head,
 	} else {
 		channel->lp_tx_head += num;
 	}
-
+	
 	mutex_unlock(&channel->pool_lock);
 	return ret;
 }
@@ -837,16 +889,16 @@ static ssize_t wcn_usb_chnmg_build(struct file *file, const char *buffer,
 	memset(buf, 0, BUF_LEN);
 	if (copy_from_user(buf, buffer, BUF_LEN))
 		return -EFAULT;
-
 	if (strncmp(buf, "tp", strlen("tp")) == 0
 			|| strncmp(buf, "lb", strlen("lb")) == 0) {
+		wcn_usb_test_print("%s 11\n", __func__);
 		ret = wcn_usb_test_command(chnmg, buf, BUF_LEN);
+		wcn_usb_test_print("%s ret = %d\n", __func__,ret);
 		if (ret)
 			return ret;
 		*ppos = sizeof(struct channel) * (++chnmg->num_channels);
 		return sizeof(struct channel);
 	}
-
 	channel_id = wcn_usb_chnmg_get_intFRuser(buffer, count);
 	pop_link = get_channel_dir(channel_id) ? tx_pop_link : rx_pop_link;
 	if (channel_id < 0 ||  channel_id > 32) {
@@ -865,6 +917,15 @@ static ssize_t wcn_usb_chnmg_build(struct file *file, const char *buffer,
 	return sizeof(struct channel);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+static const struct proc_ops wcn_usb_chnmg_fops = {
+	.proc_read = wcn_usb_chnmg_show,
+	.proc_write = wcn_usb_chnmg_build,
+	.proc_open = wcn_usb_chnmg_open,
+	.proc_release = wcn_usb_chnmg_release,
+	.proc_lseek = noop_llseek,
+};
+#else
 static const struct file_operations wcn_usb_chnmg_fops = {
 	.owner = THIS_MODULE,
 	.read = wcn_usb_chnmg_show,
@@ -873,6 +934,7 @@ static const struct file_operations wcn_usb_chnmg_fops = {
 	.release = wcn_usb_chnmg_release,
 	.llseek = noop_llseek,
 };
+#endif
 
 static ssize_t wcn_usb_chnmg_destroy(struct file *file, const char *buffer,
 		size_t count, loff_t *ppos)
@@ -903,6 +965,15 @@ static ssize_t wcn_usb_chnmg_destroy(struct file *file, const char *buffer,
 	return sizeof(struct channel);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+static const struct proc_ops wcn_usb_chnmg_defile_fops = {
+	.proc_read = wcn_usb_chnmg_show,
+	.proc_write = wcn_usb_chnmg_destroy,
+	.proc_open = wcn_usb_chnmg_open,
+	.proc_release = wcn_usb_chnmg_release,
+	.proc_lseek = noop_llseek,
+};
+#else
 static const struct file_operations wcn_usb_chnmg_defile_fops = {
 	.owner = THIS_MODULE,
 	.read = wcn_usb_chnmg_show,
@@ -911,12 +982,17 @@ static const struct file_operations wcn_usb_chnmg_defile_fops = {
 	.release = wcn_usb_chnmg_release,
 	.llseek = noop_llseek,
 };
+#endif
 
 static int print_level_open(struct inode *inode, struct file *file)
 {
 	struct chnmg *chnmg;
 	/* get channel_list head */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 17, 0)
+	chnmg = (struct chnmg *)pde_data(inode);
+#else
 	chnmg = (struct chnmg *)PDE_DATA(inode);
+#endif
 
 	file->private_data = chnmg;
 	return 0;
@@ -964,6 +1040,15 @@ static ssize_t print_level_read(struct file *file, char *buffer,
 	return 16;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+const struct proc_ops print_level = {
+	.proc_read = print_level_read,
+	.proc_write = print_level_write,
+	.proc_open = print_level_open,
+	.proc_release = wcn_usb_chnmg_release,
+	.proc_lseek = noop_llseek,
+};
+#else
 const struct file_operations print_level = {
 	.owner = THIS_MODULE,
 	.read = print_level_read,
@@ -972,7 +1057,7 @@ const struct file_operations print_level = {
 	.release = wcn_usb_chnmg_release,
 	.llseek = noop_llseek,
 };
-
+#endif
 
 #define wcn_usb_channel_debug
 #ifdef wcn_usb_channel_debug
@@ -1251,6 +1336,15 @@ static int wcn_usb_channel_debug_release(struct inode *indoe, struct file *file)
 	return 0;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+const struct proc_ops channel_debug = {
+	.proc_read = wcn_usb_channel_debug_read,
+	.proc_write = wcn_usb_channel_debug_write,
+	.proc_open = wcn_usb_channel_debug_open,
+	.proc_release = wcn_usb_channel_debug_release,
+	.proc_lseek = noop_llseek,
+};
+#else
 const struct file_operations channel_debug = {
 	.owner = THIS_MODULE,
 	.read = wcn_usb_channel_debug_read,
@@ -1259,6 +1353,7 @@ const struct file_operations channel_debug = {
 	.release = wcn_usb_channel_debug_release,
 	.llseek = noop_llseek,
 };
+#endif
 
 #endif
 
@@ -1368,6 +1463,15 @@ static ssize_t wcn_usb_channel_romcode_read(struct file *file, char *buffer,
 	return buf_size;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+const struct proc_ops romcode_test = {
+	.proc_read = wcn_usb_channel_romcode_read,
+	.proc_write = wcn_usb_channel_romcode_write,
+	.proc_open = wcn_usb_channel_debug_open,
+	.proc_release = wcn_usb_channel_debug_release,
+	.proc_lseek = noop_llseek,
+};
+#else
 const struct file_operations romcode_test = {
 	.owner = THIS_MODULE,
 	.read = wcn_usb_channel_romcode_read,
@@ -1376,6 +1480,71 @@ const struct file_operations romcode_test = {
 	.release = wcn_usb_channel_debug_release,
 	.llseek = noop_llseek,
 };
+#endif
+
+int timer_count = 1000;
+static ssize_t wcn_usb_ch25_write(struct file *file,
+		const char *buffer, size_t count, loff_t *ppos)
+{
+	
+	// action = wcn_usb_chnmg_get_intFRuser(buffer, count);
+	// switch (action) {
+	char *kbuf;
+
+	if (count > 10) {
+		wcn_usb_test_print("%s error count\n", __func__);
+		return -EINVAL;
+	}
+
+	kbuf = kzalloc(count, GFP_KERNEL);
+	if (!kbuf) {
+		wcn_usb_test_print("%s no memory\n", __func__);
+		return -ENOMEM;
+	}
+
+	if (copy_from_user(kbuf, buffer, count)) {
+		kfree(kbuf);
+		wcn_usb_test_print("%s copy error\n", __func__);
+		return -EIO;
+	}
+
+	if (!string_is_num(kbuf)) {
+		kfree(kbuf);
+		wcn_usb_test_print("%s we only want number!\n", __func__);
+		return -EINVAL;
+	}
+
+	timer_count = atoi(kbuf);
+	wcn_usb_test_print("%stimer_count = %d!\n", __func__, timer_count);
+	kfree(kbuf);
+	
+	return count;
+}
+static ssize_t wcn_usb_ch25_read(struct file *file, char *buffer,
+		size_t count, loff_t *ppos)
+{
+	
+	return 0;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 6, 0)
+const struct proc_ops ch25_test = {
+	.proc_read = wcn_usb_ch25_read,
+	.proc_write = wcn_usb_ch25_write,
+	.proc_open = wcn_usb_channel_debug_open,
+	.proc_release = wcn_usb_channel_debug_release,
+	.proc_lseek = noop_llseek,
+};
+#else
+const struct file_operations ch25_test = {
+	.owner = THIS_MODULE,
+	.read = wcn_usb_ch25_read,
+	.write = wcn_usb_ch25_write,
+	.open = wcn_usb_channel_debug_open,
+	.release = wcn_usb_channel_debug_release,
+	.llseek = noop_llseek,
+};
+#endif
 
 struct proc_dir_entry *proc_sys;
 int wcn_usb_chnmg_init(void)
@@ -1400,24 +1569,24 @@ int wcn_usb_chnmg_init(void)
 	if (!chnmg)
 		return -ENOMEM;
 
-	chnmg->dir = NULL;
+	chnmg->dir = proc_sys;
 
-	chnmg->file = proc_create_data("wcn_usb/chnmg", 0544, chnmg->dir,
+	chnmg->file = proc_create_data("chnmg", 0544, chnmg->dir,
 			&wcn_usb_chnmg_fops, chnmg);
 	if (!chnmg->file)
 		goto CHNMG_FILE_ERROR;
 
-	chnmg->defile = proc_create_data("wcn_usb/chnmg_destroy",
+	chnmg->defile = proc_create_data("chnmg_destroy",
 			0544, chnmg->dir, &wcn_usb_chnmg_defile_fops, chnmg);
 	if (!chnmg->defile)
 		goto CHNMG_FILE_ERROR;
 
-	chnmg->print_level = proc_create_data("wcn_usb/print",
+	chnmg->print_level = proc_create_data("print",
 			0544, chnmg->dir, &print_level, chnmg);
 	if (!chnmg->print_level)
 		goto CHNMG_FILE_ERROR;
 
-	chnmg->channel_debug = proc_create_data("wcn_usb/channel_debug",
+	chnmg->channel_debug = proc_create_data("channel_debug",
 			0544, chnmg->dir, &channel_debug, chnmg);
 	if (!chnmg->channel_debug)
 		goto CHNMG_FILE_ERROR;
@@ -1425,8 +1594,11 @@ int wcn_usb_chnmg_init(void)
 	for (i = 0; i < 33; i++)
 		spin_lock_init(&g_channel_debug[i].lock);
 
-	chnmg->channel_debug = proc_create_data("wcn_usb/romcode_test",
+	chnmg->channel_debug = proc_create_data("romcode_test",
 			0544, chnmg->dir, &romcode_test, chnmg);
+
+	chnmg->channel_debug = proc_create_data("ch25_test",
+			0544, chnmg->dir, &ch25_test, chnmg);
 
 	wcn_usb_test_print("%s init success!\n", __func__);
 	this_chnmg = chnmg;
@@ -1438,10 +1610,21 @@ CHNMG_FILE_ERROR:
 }
 #if 0
 module_init(wcn_usb_chnmg_init);
+#endif
 
-static void wcn_usb_chnmg_exit(void)
+void wcn_usb_chnmg_exit(void)
 {
+	remove_proc_entry("chnmg", proc_sys);
+	remove_proc_entry("chnmg_destroy", proc_sys);
+	remove_proc_entry("print", proc_sys);
+	remove_proc_entry("channel_debug", proc_sys);
+	remove_proc_entry("romcode_test", proc_sys);
+	remove_proc_entry("ch25_test", proc_sys);
+	remove_proc_entry("wcn_usb", NULL);
 	kfree(this_chnmg);
+	this_chnmg = NULL;
 }
+
+#if 0
 module_exit(wcn_usb_chnmg_exit);
 #endif

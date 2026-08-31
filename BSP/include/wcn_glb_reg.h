@@ -10,22 +10,20 @@
 #ifndef _WCN_GLB_REG_H_
 #define _WCN_GLB_REG_H_
 
-
-#ifndef CONFIG_CHECK_DRIVER_BY_CHIPID
-#ifdef CONFIG_UWE5621
-#include "uwe5621_glb.h"
+#ifdef CONFIG_SC2342_INTEG
+#include "sc2342_glb.h"
 #endif
 
-#ifdef CONFIG_UWE5622
-#include "uwe5622_glb.h"
+#ifdef CONFIG_SC2355
+#include "sc2355_glb.h"
 #endif
 
-#ifdef CONFIG_UWE5623
-#include "uwe5623_glb.h"
+#ifdef CONFIG_UMW2652
+#include "umw2652_glb.h"
 #endif
 
-#else
-#include "uwe562x_glb.h"
+#ifdef CONFIG_UMW2653
+#include "umw2653_glb.h"
 #endif
 
 #endif

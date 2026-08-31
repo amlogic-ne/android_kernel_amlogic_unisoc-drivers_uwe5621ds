@@ -10,10 +10,15 @@
  * GNU General Public License for more details.
  */
 
-#include <wcn_bus.h>
+#include <linux/kernel.h>
+#include "marlin_platform.h"
+#include "wcn_bus.h"
 
 #include "edma_engine.h"
 #include "mchn.h"
+
+#define TX 1
+#define RX 0
 
 static struct mchn_info_t g_mchn;
 
@@ -35,10 +40,10 @@ int mbuf_link_alloc(int chn, struct mbuf_t **head, struct mbuf_t **tail,
 	struct mchn_info_t *mchn = mchn_info();
 	struct buffer_pool *pool = &(mchn->chn_public[chn].pool);
 
-	PCIE_INFO("pool=%p, chn=%d, free=%d\n", pool, chn, pool->free);
+	WCN_DBG("pool=%p, chn=%d, free=%d\n", pool, chn, pool->free);
 	spin_lock_irqsave(&(pool->lock), pool->irq_flags);
 	if ((*num <= 0) || (pool->free <= 0)) {
-		PCIE_ERR("[+]%s err, num %d, free %d)\n",
+		WCN_ERR("[+]%s err, num %d, free %d)\n",
 			__func__, *num, pool->free);
 		*num = 0;
 		*head = *tail = NULL;
@@ -73,7 +78,7 @@ int mbuf_link_free(int chn, struct mbuf_t *head, struct mbuf_t *tail, int num)
 
 	if ((head == NULL) || (tail == NULL) || (num == 0) ||
 	    (tail->next != 0)) {
-		PCIE_ERR("%s@%d(%d, 0x%p, 0x%p, %d)err\n",
+		WCN_ERR("%s@%d(%d, 0x%p, 0x%p, %d)err\n",
 			__func__, __LINE__, chn, head, tail, num);
 
 		return -1;
@@ -98,14 +103,14 @@ int mbuf_pool_init(struct buffer_pool *pool, int size, int payload)
 	spin_lock_init(&(pool->lock));
 	pool->mem = kmalloc((sizeof(struct mbuf_t) + payload) * size,
 			     GFP_KERNEL);
-	PCIE_INFO("mbuf_pool->mem:0x%lx\n",
-		(unsigned long)virt_to_phys(pool->mem));
+	WCN_DBG("mbuf_pool->mem:0x%lx\n",
+		 (unsigned long)virt_to_phys(pool->mem));
 	memset(pool->mem, 0x00, (sizeof(struct mbuf_t) + payload) * size);
 	pool->head = (struct mbuf_t *) (pool->mem);
 	for (i = 0, mbuf = (struct mbuf_t *) (pool->head);
 	     i < (size - 1); i++) {
 		mbuf->seq = i;
-		PCIE_INFO("%s mbuf[%d]:{0x%lx, 0x%lx}\n", __func__, i,
+		WCN_DBG("%s mbuf[%d]:{0x%lx, 0x%lx}\n", __func__, i,
 			(unsigned long)mbuf,
 			(unsigned long)virt_to_phys(mbuf));
 		next = (struct mbuf_t *) ((char *)mbuf +
@@ -115,15 +120,15 @@ int mbuf_pool_init(struct buffer_pool *pool, int size, int payload)
 		mbuf->next = next;
 		mbuf = next;
 	}
-	PCIE_INFO("%s mbuf[%d]:{0x%lx, 0x%lx}\n", __func__, i,
-		(unsigned long)mbuf,
-		(unsigned long)virt_to_phys(mbuf));
+	WCN_DBG("%s mbuf[%d]:{0x%lx, 0x%lx}\n", __func__, i,
+		 (unsigned long)mbuf,
+		 (unsigned long)virt_to_phys(mbuf));
 	mbuf->seq = i;
 	mbuf->buf = (char *)mbuf + sizeof(struct mbuf_t);
 	mbuf->len = payload;
 	mbuf->next = NULL;
 	pool->free = size;
-	PCIE_INFO("%s(0x%p, %d)\n", __func__, pool, pool->free);
+	WCN_DBG("%s(0x%p, %d)\n", __func__, pool, pool->free);
 
 	return 0;
 }
@@ -187,7 +192,7 @@ EXPORT_SYMBOL(mchn_hw_req_push_link);
 int mchn_hw_cb_in_irq(int chn)
 {
 	if (!g_mchn.ops[chn]) {
-		PCIE_ERR("%s: chn=%d is not register\n", __func__, chn);
+		WCN_ERR("%s: chn=%d is not register\n", __func__, chn);
 		return -1;
 	}
 
@@ -197,7 +202,7 @@ int mchn_hw_cb_in_irq(int chn)
 int mchn_hw_max_pending(int chn)
 {
 	if (!g_mchn.ops[chn]) {
-		PCIE_ERR("%s: chn=%d is not register\n", __func__, chn);
+		WCN_ERR("%s: chn=%d is not register\n", __func__, chn);
 		return -1;
 	}
 
@@ -211,13 +216,26 @@ int mchn_push_link(int chn, struct mbuf_t *head, struct mbuf_t *tail, int num)
 
 	if ((chn >= 16) || (mchn->ops[chn] == NULL) || (head == NULL) ||
 	    (tail == NULL) || (num > mchn->ops[chn]->pool_size)) {
-		WARN_ON(1);
+		WCN_ERR("%s: chn=%d, num=%d,head=%p, tail=%p\n", __func__,
+			chn, num, head, tail);
+		dump_stack();
 		return -1;
 	}
 
+	if (!wcn_get_edma_status() && (mchn->ops[chn]->inout == RX)) {
+		WCN_ERR("%s:edma not ready, chn=%d\n", __func__, chn);
+		return -1;
+	}
+
+	if (!marlin_get_download_status() && (mchn->ops[chn]->inout == TX)) {
+		WCN_ERR("%s:boot not ready, chn=%d\n", __func__, chn);
+		return -1;
+	}
+
+	if (mchn->ops[chn]->inout == TX)
+		wcn_set_tx_complete_status(0);
+
 	switch (mchn->ops[chn]->hif_type) {
-	case HW_TYPE_SDIO:
-		break;
 	case HW_TYPE_PCIE:
 		if (mchn_hw_max_pending(chn) > 0)
 			ret = edma_push_link_async(chn, (void *)head,
@@ -245,8 +263,6 @@ int mchn_push_link_wait_complete(int chn, struct mbuf_t *head,
 		return -1;
 	}
 	switch (mchn->ops[chn]->hif_type) {
-	case HW_TYPE_SDIO:
-		break;
 	case HW_TYPE_PCIE:
 		ret = edma_push_link_wait_complete(chn, (void *)head,
 						   (void *)tail, num, timeout);
@@ -259,16 +275,32 @@ int mchn_push_link_wait_complete(int chn, struct mbuf_t *head,
 }
 EXPORT_SYMBOL(mchn_push_link_wait_complete);
 
+int mchn_wcn_mem_write(unsigned int addr, void *buf, unsigned int len)
+{
+	return sprd_pcie_mem_write(addr, buf, len);
+}
+EXPORT_SYMBOL(mchn_wcn_mem_write);
+
+int mchn_wcn_mem_read(unsigned int addr, void *buf, unsigned int len)
+{
+	return sprd_pcie_mem_read(addr, buf, len);
+}
+EXPORT_SYMBOL(mchn_wcn_mem_read);
+
+int mchn_wcn_update_bits(unsigned int reg, unsigned int mask, unsigned int val)
+{
+	return sprd_pcie_update_bits(reg, mask, val);
+}
+EXPORT_SYMBOL(mchn_wcn_update_bits);
+
 int mchn_init(struct mchn_ops_t *ops)
 {
 	int ret = -1;
 	struct mchn_info_t *mchn = mchn_info();
 
-	PCIE_INFO("[+]%s(%d, %d)\n", __func__, ops->channel, ops->hif_type);
-	if ((mchn->ops[ops->channel] != NULL) ||
-	     ((ops->hif_type != HW_TYPE_SDIO) &&
-	     (ops->hif_type != HW_TYPE_PCIE))) {
-		PCIE_INFO("%s err, hif_type %d\n", __func__, ops->hif_type);
+	WCN_DBG("[+]%s(chn=%d)\n", __func__, ops->channel);
+	if (ops->hif_type != HW_TYPE_PCIE) {
+		WCN_INFO("%s err, hif_type %d\n", __func__, ops->hif_type);
 		WARN_ON(1);
 
 		return -1;
@@ -276,9 +308,6 @@ int mchn_init(struct mchn_ops_t *ops)
 	mchn->ops[ops->channel] = ops;
 
 	switch (ops->hif_type) {
-	case HW_TYPE_SDIO:
-		ret = 0;
-		break;
 	case HW_TYPE_PCIE:
 		ret = edma_chn_init(ops->channel, 0, ops->inout,
 				    ops->pool_size);
@@ -286,10 +315,11 @@ int mchn_init(struct mchn_ops_t *ops)
 	default:
 		break;
 	}
+
 	if ((ret == 0) && (ops->pool_size > 0))
 		ret = mbuf_pool_init(&(mchn->chn_public[ops->channel].pool),
 				     ops->pool_size, 0);
-	PCIE_INFO("[-]%s(%d)\n", __func__, ops->channel);
+	WCN_DBG("[-]%s(%d)\n", __func__, ops->channel);
 
 	return ret;
 }
@@ -300,17 +330,16 @@ int mchn_deinit(struct mchn_ops_t *ops)
 	int ret = 0;
 	struct mchn_info_t *mchn = mchn_info();
 
-	PCIE_INFO("[+]%s(%d, %d)\n", __func__, ops->channel, ops->hif_type);
+	WCN_INFO("[+]%s(%d, %d)\n", __func__, ops->channel, ops->hif_type);
+
 	if ((mchn->ops[ops->channel] == NULL) ||
-	    ((ops->hif_type != HW_TYPE_SDIO) &&
-	    (ops->hif_type != HW_TYPE_PCIE))) {
-		PCIE_ERR("%s err\n", __func__);
+	    (ops->hif_type != HW_TYPE_PCIE)) {
+		WCN_ERR("%s err\n", __func__);
 		return -1;
 	}
 	switch (ops->hif_type) {
-	case HW_TYPE_SDIO:
-		break;
 	case HW_TYPE_PCIE:
+		ret = edma_chn_deinit(ops->channel);
 		break;
 	default:
 		break;
@@ -318,7 +347,7 @@ int mchn_deinit(struct mchn_ops_t *ops)
 	if (ops->pool_size > 0)
 		ret = mbuf_pool_deinit(&(mchn->chn_public[ops->channel].pool));
 	mchn->ops[ops->channel] = NULL;
-	PCIE_INFO("[-]%s(%d)\n", __func__, ops->channel);
+	WCN_INFO("[-]%s(%d)\n", __func__, ops->channel);
 
 	return ret;
 }

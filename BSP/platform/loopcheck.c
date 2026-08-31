@@ -1,15 +1,23 @@
 #include <linux/completion.h>
-#include <linux/workqueue.h>
+#include <linux/delay.h>
+#include <linux/kernel.h>
+#include <linux/version.h>
+#if KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE
+#include <linux/sched/clock.h>
+#endif
+#include <linux/slab.h>
 #include <linux/timer.h>
+#include <linux/workqueue.h>
 
 #include "wcn_glb.h"
+#include "wcn_misc.h"
 #include "wcn_procfs.h"
 
 #define LOOPCHECK_TIMER_INTERVAL      5
 #define WCN_LOOPCHECK_INIT	1
 #define WCN_LOOPCHECK_OPEN	2
+#define WCN_LOOPCHECK_FAIL	3
 
-#ifdef CONFIG_WCN_LOOPCHECK
 struct wcn_loopcheck {
 	unsigned long status;
 	struct completion completion;
@@ -18,194 +26,100 @@ struct wcn_loopcheck {
 };
 
 static struct wcn_loopcheck loopcheck;
-#endif
-static struct completion atcmd_completion;
-static struct mutex atcmd_lock;
 
-int at_cmd_send(char *buf, unsigned int len)
+static int loopcheck_send(char *buf, unsigned int len)
 {
 	unsigned char *send_buf = NULL;
-	struct mbuf_t *head, *tail;
-	int num = 1;
+	struct mbuf_t *head = NULL;
+	struct mbuf_t *tail = NULL;
+	struct mchn_ops_t *mchn_ops = &mdbg_proc_ops[MDBG_AT_TX_OPS];
+	int ret = 0, num = 1;
 
-	WCN_DEBUG("%s len=%d\n", __func__, len);
-	if (unlikely(marlin_get_module_status() != true)) {
-		WCN_ERR("WCN module have not open\n");
-		return -EIO;
-	}
+	WCN_INFO("tx:%s\n", buf);
 
 	send_buf = kzalloc(len + PUB_HEAD_RSV + 1, GFP_KERNEL);
 	if (!send_buf)
 		return -ENOMEM;
 	memcpy(send_buf + PUB_HEAD_RSV, buf, len);
 
-	if (!sprdwcn_bus_list_alloc(mdbg_proc_ops[MDBG_AT_TX_OPS].channel,
-				    &head, &tail, &num)) {
+	if (!sprdwcn_bus_list_alloc(mchn_ops->channel, &head, &tail, &num)) {
 		head->buf = send_buf;
 		head->len = len;
 		head->next = NULL;
-		sprdwcn_bus_push_list(mdbg_proc_ops[MDBG_AT_TX_OPS].channel,
-				      head, tail, num);
-	}
-	return 0;
-}
+#ifdef CONFIG_WCN_SDIO
+		ret = sprdwcn_bus_push_list_direct(mchn_ops->channel,
+						   head, tail, num);
 
-#ifdef CONFIG_WCN_LOOPCHECK
-
-#if (defined(CONFIG_WCN_USB) && defined(CONFIG_MTK_BOARD))
-extern bool marlin_dev_is_suspended(void);
+		if (mchn_ops->pop_link)
+			mchn_ops->pop_link(mchn_ops->channel,
+					   head, tail, num);
+		else
+			sprdwcn_bus_list_free(mchn_ops->channel,
+					      head, tail, num);
+#else
+		ret = sprdwcn_bus_push_list(mchn_ops->channel,
+					    head, tail, num);
 #endif
+		if (ret != 0)
+			WCN_ERR("loopcheck send fail!\n");
+	} else {
+		WCN_ERR("%s alloc buf fail!\n", __func__);
+		kfree(send_buf);
+		return -ENOMEM;
+	}
+	return ret;
+}
 
 static void loopcheck_work_queue(struct work_struct *work)
 {
 	int ret;
+	char a[64];
 	unsigned long timeleft;
-	char a[] = "at+loopcheck\r\n";
+	unsigned long long sprdwcn_rx_cnt_a = 0, sprdwcn_rx_cnt_b = 0;
+	unsigned long long loopcheck_tx_ns, marlin_boot_t;
+
+	loopcheck_tx_ns = local_clock();
+	marlin_boot_t = marlin_bootup_time_get();
+	MARLIN_64B_NS_TO_32B_MS(loopcheck_tx_ns);
+	MARLIN_64B_NS_TO_32B_MS(marlin_boot_t);
+	snprintf(a, (size_t)sizeof(a), "at+loopcheck=%llu,%llu\r\n",
+		 loopcheck_tx_ns, marlin_boot_t);
 
 	if (!test_bit(WCN_LOOPCHECK_OPEN, &loopcheck.status))
 		return;
-	mutex_lock(&atcmd_lock);
-	at_cmd_send(a, sizeof(a));
 
-	timeleft = wait_for_completion_timeout(&loopcheck.completion,
-					       (3 * HZ));
-	mutex_unlock(&atcmd_lock);
-	if (!test_bit(WCN_LOOPCHECK_OPEN, &loopcheck.status))
+	sprdwcn_rx_cnt_a = sprdwcn_bus_get_rx_total_cnt();
+	usleep_range(4000, 6000);
+	sprdwcn_rx_cnt_b = sprdwcn_bus_get_rx_total_cnt();
+
+	if (unlikely(!marlin_get_module_status())) {
+		WCN_ERR("WCN module have not open\n");
 		return;
-	if (!timeleft) {
-		stop_loopcheck();
-		WCN_ERR("didn't get loopcheck ack\n");
+	}
 
-#if (defined(CONFIG_WCN_USB) && defined(CONFIG_MTK_BOARD))
-		if (marlin_dev_is_suspended()) {
-			WCN_INFO("%s usb disconnect during str ?\n", __func__);
+	if (sprdwcn_rx_cnt_a == sprdwcn_rx_cnt_b) {
+		loopcheck_send(a, strlen(a));
+		timeleft = wait_for_completion_timeout(&loopcheck.completion,
+						       (4 * HZ));
+		if (!test_bit(WCN_LOOPCHECK_OPEN, &loopcheck.status))
+			return;
+		if (!timeleft) {
+			set_bit(WCN_LOOPCHECK_FAIL, &loopcheck.status);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
+			WCN_ERR("didn't get loopcheck ack\n");
+#else
+			WCN_ERR("didn't get loopcheck ack, printk=%d\n",console_loglevel);
+#endif
+			mdbg_assert_interface("WCN loopcheck erro!");
+			clear_bit(WCN_LOOPCHECK_FAIL, &loopcheck.status);
 			return;
 		}
-#endif
-
-		WCN_INFO("start dump CP2 mem\n");
-		mdbg_assert_interface("loopcheck fail");
-		return;
 	}
 
 	ret = queue_delayed_work(loopcheck.workqueue, &loopcheck.work,
 				 LOOPCHECK_TIMER_INTERVAL * HZ);
 }
-#endif
 
-void switch_cp2_log(bool flag)
-{
-	unsigned long timeleft;
-	char a[32];
-	unsigned char ret;
-
-	WCN_INFO("%s - %s entry!\n", __func__, (flag ? "open" : "close"));
-	mutex_lock(&atcmd_lock);
-	sprintf(a, "at+armlog=%d\r\n", (flag ? 1 : 0));
-	ret = at_cmd_send(a, sizeof(a));
-	if (ret) {
-		mutex_unlock(&atcmd_lock);
-		WCN_ERR("%s fail!\n", __func__);
-		return;
-	}
-	timeleft = wait_for_completion_timeout(&atcmd_completion, (3 * HZ));
-	mutex_unlock(&atcmd_lock);
-	if (!timeleft)
-		WCN_ERR("didn't get %s ack\n", __func__);
-}
-
-int get_board_ant_num(void)
-{
-	unsigned long timeleft;
-	char a[] = "at+getantnum\r\n";
-	unsigned char *at_cmd_buf;
-	unsigned char ret;
-
-	WCN_DEBUG("%s entry!\n", __func__);
-
-	/* 1. uwe5621 module on RK board(rk3368):
-	 * Antenna num is fixed to one.
-	 */
-#ifdef CONFIG_RK_BOARD
-#ifndef CONFIG_CHECK_DRIVER_BY_CHIPID
-#ifdef CONFIG_UWE5621
-	WCN_INFO("%s [one_ant]\n", __func__);
-	return MARLIN_ONE_ANT;
-#endif
-#else /*CONFIG_CHECK_DRIVER_BY_CHIPID*/
-	if (wcn_get_chip_model() == WCN_CHIP_MARLIN3) {
-		WCN_INFO("%s [one_ant]\n", __func__);
-		return MARLIN_ONE_ANT;
-	}
-#endif
-#endif /* CONFIG_RK_BOARD */
-
-	/* 2. uwe5622 module:
-	 * Antenna num is fixed to one.
-	 */
-#ifndef CONFIG_CHECK_DRIVER_BY_CHIPID
-#ifdef CONFIG_UWE5622
-	WCN_INFO("%s [one_ant]\n", __func__);
-	return MARLIN_ONE_ANT;
-#endif
-#else /*CONFIG_CHECK_DRIVER_BY_CHIPID*/
-	if (wcn_get_chip_model() == WCN_CHIP_MARLIN3L) {
-		WCN_INFO("%s [one_ant]\n", __func__);
-		return MARLIN_ONE_ANT;
-	}
-#endif
-
-	/* 3. Other situations:
-	 * send at cmd to get antenna num.
-	 */
-	mutex_lock(&atcmd_lock);
-	ret = at_cmd_send(a, sizeof(a));
-	if (ret) {
-		mutex_unlock(&atcmd_lock);
-		WCN_ERR("%s fail!\n", __func__);
-		return ret;
-	}
-	timeleft = wait_for_completion_timeout(&atcmd_completion, (3 * HZ));
-	if (!timeleft) {
-		mutex_unlock(&atcmd_lock);
-		WCN_ERR("didn't get board ant num, default:[three_ant]\n");
-		return MARLIN_THREE_ANT;
-	}
-	at_cmd_buf = mdbg_get_at_cmd_buf();
-	mutex_unlock(&atcmd_lock);
-	if (at_cmd_buf[0] == '2') {
-		WCN_INFO("%s [two_ant]\n", __func__);
-		return MARLIN_TWO_ANT;
-	} else if (at_cmd_buf[0] == '3') {
-		WCN_INFO("%s [three_ant]\n", __func__);
-		return MARLIN_THREE_ANT;
-	}
-	WCN_ERR("%s read err:%s, default:[three_ant]\n",
-		__func__, at_cmd_buf);
-	return MARLIN_THREE_ANT;
-}
-
-void get_cp2_version(void)
-{
-	unsigned long timeleft;
-	char a[] = "at+spatgetcp2info\r\n";
-	unsigned char ret;
-
-	WCN_INFO("%s entry!\n", __func__);
-	mutex_lock(&atcmd_lock);
-	ret = at_cmd_send(a, sizeof(a));
-	if (ret) {
-		mutex_unlock(&atcmd_lock);
-		WCN_ERR("%s fail!\n", __func__);
-		return;
-	}
-	timeleft = wait_for_completion_timeout(&atcmd_completion, (3 * HZ));
-	mutex_unlock(&atcmd_lock);
-	if (!timeleft)
-		WCN_ERR("didn't get CP2 version\n");
-}
-
-#ifdef CONFIG_WCN_LOOPCHECK
 void start_loopcheck(void)
 {
 	if (!test_bit(WCN_LOOPCHECK_INIT, &loopcheck.status) ||
@@ -219,7 +133,8 @@ void start_loopcheck(void)
 void stop_loopcheck(void)
 {
 	if (!test_bit(WCN_LOOPCHECK_INIT, &loopcheck.status) ||
-	    !test_and_clear_bit(WCN_LOOPCHECK_OPEN, &loopcheck.status))
+	    !test_and_clear_bit(WCN_LOOPCHECK_OPEN, &loopcheck.status) ||
+	    test_bit(WCN_LOOPCHECK_FAIL, &loopcheck.status))
 		return;
 	WCN_INFO("%s\n", __func__);
 	complete_all(&loopcheck.completion);
@@ -230,42 +145,28 @@ void complete_kernel_loopcheck(void)
 {
 	complete(&loopcheck.completion);
 }
-#endif
-
-void complete_kernel_atcmd(void)
-{
-	complete(&atcmd_completion);
-}
 
 int loopcheck_init(void)
 {
-#ifdef CONFIG_WCN_LOOPCHECK
-	WCN_DEBUG("loopcheck_init\n");
 	loopcheck.status = 0;
 	init_completion(&loopcheck.completion);
 	loopcheck.workqueue =
-			create_singlethread_workqueue("WCN_LOOPCHECK_QUEUE");
+		create_singlethread_workqueue("WCN_LOOPCHECK_QUEUE");
 	if (!loopcheck.workqueue) {
 		WCN_ERR("WCN_LOOPCHECK_QUEUE create failed");
 		return -ENOMEM;
 	}
 	set_bit(WCN_LOOPCHECK_INIT, &loopcheck.status);
 	INIT_DELAYED_WORK(&loopcheck.work, loopcheck_work_queue);
-#endif
-	init_completion(&atcmd_completion);
-	mutex_init(&atcmd_lock);
 
 	return 0;
 }
 
 int loopcheck_deinit(void)
 {
-#ifdef CONFIG_WCN_LOOPCHECK
 	stop_loopcheck();
 	destroy_workqueue(loopcheck.workqueue);
 	loopcheck.status = 0;
-#endif
-	mutex_destroy(&atcmd_lock);
 
 	return 0;
 }

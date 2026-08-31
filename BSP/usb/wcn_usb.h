@@ -13,6 +13,7 @@
 #include <linux/kthread.h>
 #include <linux/notifier.h>
 #include <wcn_bus.h>
+#include <marlin_platform.h>
 
 #define wcn_usb_info(fmt, args...) \
 	pr_info("wcn_usb info " fmt, ## args)
@@ -68,7 +69,10 @@ struct wcn_usb_intf {
  * @intf: This endpoint must belong to a interface.
  * @epNum: This endpoint's index in interface's cur_altsetting->endpoint[]
  *	that it belong to.
- * @submitted: for retract urb;
+ * @submitted: for retract urb.
+ * @submit_stop_lock: change for bug 2391041, used mutex instead of
+ *  spinlock_t, becaused called usb_kill_anchored_urbs in wcn_usb_ep_stop might_sleep.
+ * @submit_lock: change for bug 2400067, spinlock_t submit_lock used in interrupt context.
  */
 struct wcn_usb_ep {
 	int channel;
@@ -76,6 +80,7 @@ struct wcn_usb_ep {
 	struct wcn_usb_intf *intf;
 	__u8 numEp;
 	struct usb_anchor submitted;
+	struct mutex submit_stop_lock;
 	spinlock_t submit_lock;
 };
 
@@ -124,6 +129,8 @@ struct wcn_usb_notifier {
 
 struct wcn_usb_work_data {
 	struct task_struct	*wcn_usb_thread;
+	struct tasklet_struct wcn_usb_rx_tx_tasklet;
+	struct work_struct	wcn_usb_rx_tx_work;
 	wait_queue_head_t	wait_mbuf;
 	wait_queue_head_t	work_completion;
 	struct mutex		channel_lock;
@@ -134,6 +141,7 @@ struct wcn_usb_work_data {
 	int			report_num_last;
 	int			transfer_remains;
 	int			goon;
+	bool			exit_flag;  // for remove usb work thread
 	struct completion	callback_complete;
 	struct wcn_usb_notifier	*wn;
 };
@@ -190,6 +198,7 @@ struct usb_ctrlrequest *wcn_usb_packet_pop_setup_packet(
 		ep->numEp = -1; \
 		spin_lock_init(&ep->intf_lock); \
 		init_usb_anchor(&ep->submitted); \
+		mutex_init(&ep->submit_stop_lock); \
 		spin_lock_init(&ep->submit_lock); \
 	} while (0)
 
@@ -207,6 +216,7 @@ struct usb_ctrlrequest *wcn_usb_packet_pop_setup_packet(
 #endif
 
 void wcn_usb_work_data_init(struct wcn_usb_work_data *work_data, int id);
+void wcn_usb_work_data_deinit(struct wcn_usb_work_data *work_data, int id);
 
 /* follow macro call wcn_usb_intf2endpoint
  * So we need hold intf, before we call them
@@ -290,11 +300,21 @@ enum wcn_usb_event {
 
 
 int wcn_usb_apostle_begin(int chn);
+int wcn_usb_apostle_stop(int chn);
 int wcn_usb_store_addr2chn(__u8 epAddress);
+int wcn_usb_tx_rx_chn_stop(void);
 
 int wcn_usb_packet_is_freed(struct wcn_usb_packet *packet);
 void *wcn_usb_packet_pop_buf(struct wcn_usb_packet *packet);
 void wcn_usb_init_copy_men(void);
+void wcn_usb_deinit_copy_men(void);
+void wcn_usb_init_poll_thread(void);
+void wcn_usb_deinit_poll_thread(void);
+int wcn_usb_mbuf_alloc_rx(int chn, struct mbuf_t *head,
+		struct mbuf_t *tail, int num);
+int wcn_usb_mbuf_release_rx(int chn, struct mbuf_t *head,
+		struct mbuf_t *tail, int num);
+int wcn_usb_channel_is_rx(int channel);
 
 void channel_debug_mbuf_from_user(int chn, int num);
 void channel_debug_mbuf_to_user(int chn, int num);
@@ -323,16 +343,22 @@ void channel_debug_mbuf_8(int times);
 void channel_debug_interrupt_callback(int times);
 void channel_debug_cp_num(int times);
 int wcn_usb_chnmg_init(void);
-
+void wcn_usb_chnmg_exit(void);
 
 int wcn_usb_state_sent_event(enum wcn_usb_event event);
 int wcn_usb_state_register(struct notifier_block *nb);
 int wcn_usb_state_unregister(struct notifier_block *nb);
 int wcn_usb_state_get(enum wcn_usb_event event);
+void wcn_usb_state_clear(enum wcn_usb_event event);
 
 /* for test dump */
 unsigned int marlin_get_wcn_chipid(void);
 int marlin_dump_from_romcode_usb(unsigned int addr, void *buf, int len);
 int marlin_get_version(void);
 int marlin_connet(void);
+#ifdef CONFIG_WCN_USB_USE_THREAD
+int wcn_usb_chn_thread_deinit(void);
+#endif
+int wcn_usb_copy_thread_deinit(void);
+bool wcn_usb_get_suspend_resume_flag(void);
 #endif

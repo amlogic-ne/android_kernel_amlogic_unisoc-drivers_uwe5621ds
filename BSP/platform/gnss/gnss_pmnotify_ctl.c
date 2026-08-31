@@ -32,12 +32,9 @@
 #include <linux/timer.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
-// #include <linux/wakelock.h>
 #include <linux/wait.h>
-#include <marlin_platform.h>
-
+#include "marlin_platform.h"
 #include "gnss_common.h"
-
 #define GNSS_DATA_MAX_LEN	16
 
 struct sprd_gnss {
@@ -50,8 +47,6 @@ struct sprd_gnss {
 
 static struct sprd_gnss gnss_dev;
 static int gnss_delay_cancel;
-
-extern bool gnss_delay_ctl(void);
 
 static int gnss_pmnotify_ctl_open(struct inode *inode, struct file *filp)
 {
@@ -120,7 +115,7 @@ static struct miscdevice gnss_pmnotify_ctl_device = {
 	.fops = &gnss_pmnotify_ctl_fops,
 };
 
-int __init gnss_pmnotify_ctl_init(void)
+int  gnss_pmnotify_ctl_init(void)
 {
 	int err = 0;
 
@@ -135,14 +130,17 @@ int __init gnss_pmnotify_ctl_init(void)
 	return err;
 }
 
-void __exit gnss_pmnotify_ctl_cleanup(void)
+void  gnss_pmnotify_ctl_cleanup(void)
 {
 	misc_deregister(&gnss_pmnotify_ctl_device);
+	unregister_pm_notifier(&gnss_pm_notifier);
 }
-
-#if (0)
+#if 0
 module_init(gnss_pmnotify_ctl_init);
 module_exit(gnss_pmnotify_ctl_cleanup);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("sprd gnss pmnotify ctl driver");
+#else
+EXPORT_SYMBOL(gnss_pmnotify_ctl_init);
+EXPORT_SYMBOL(gnss_pmnotify_ctl_cleanup);
 #endif

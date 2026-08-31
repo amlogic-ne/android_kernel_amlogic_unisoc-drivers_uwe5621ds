@@ -1,56 +1,94 @@
+#support
+# Spreadtrum WCN device (NEW )configuration
 #
-# UNISOC WCN device (NEW )configuration
-#
-menu "UNISOC WCN Device Drivers(for new chip...)"
+menu "Spreadtrum WCN Device Drivers"
 
 config SC23XX
-	bool "SC23XX chip Support"
-	default n
+	bool "SC23XX chip support"
+	#depends on MMC
+	default y
 	help
 	  This is support wcn chip for spreadtrum.
 	  if you want to use 23xx series wcn chip of spreadtrum.
 	  please say "y".
-	  Thanks.
-
-config UMW2653
-	tristate "UMW2653 chip Support"
-	depends on SC23XX
-	default n
-	help
-	  This is support wcn chip for spreadtrum.
-	  If you want to use UMW2653 chip of spreadtrum.
-	  Please say "y".
-	  Thanks.
-
-config SC2342_INTEG
-	tristate "SC2342 Integrated chip Support"
-	depends on SC23XX
-	default n
-	help
-	  This is support wcn chip for spreadtrum.
-	  If you want to use sc2342 integrated chip of spreadtrum.
-	  Please say "y".
-	  Thanks.
-
 
 config SC2355
-	tristate "SC2355 chip Support"
+	tristate "SC2355 chip support"
 	depends on SC23XX
 	default n
 	help
 	  This is support wcn chip for spreadtrum.
 	  If you want to use sc2355 chip of spreadtrum.
 	  Please say "y".
-	  Thanks.
 
-config SC2366
-	tristate "SC2366 chip Support"
+config UMW2652
+	tristate "UMW2652 chip support"
 	depends on SC23XX
 	default n
 	help
 	  This is support wcn chip for spreadtrum.
-	  If you want to use sc2366 chip of spreadtrum.
+	  If you want to use umw2652 chip of spreadtrum.
 	  Please say "y".
+
+config UMW2653
+	tristate "UMW2653 chip support"
+	depends on SC23XX
+	default n
+	help
+	  This is support wcn chip for spreadtrum.
+	  If you want to use umw2653 chip of spreadtrum.
+	  Please say "y".
+
+
+config SDIOHAL
+	tristate "UMW2653 chip support"
+	depends on SC23XX
+	default n
+	help
+	  If you want to use SDIOHAL.
+	  Please say "y".
+	  
+config WCN_SLP
+	tristate "UMW2653 chip support"
+	depends on SC23XX
+	default n
+	help
+	  If you want to use WCN_SLP.
+	  Please say "y".
+
+config WCN_BOOT
+	tristate "UMW2653 chip support"
+	depends on SC23XX
+	default y
+	help
+	  If you want to use WCN_BOOT.
+	  Please say "y".	  
+	  
+config WCN_FIRMWARE_VERIFY
+	bool "wcn firmware security verify support"
+	default n
+	help
+	  This is support wcn firmware security verify.
+	  if you want to support. 
+	  please say "y".
+	  Thanks.
+
+config CONFIG_WCN_PARSE_DTS
+	bool "Marlin device tree support"
+	default n
+	help
+	  This is support marlin device tree.
+	  if you want to support. 
+	  please say "y".
+	  Thanks.
+
+config THIRD_PARTY_BOARD
+	bool "isn't unisoc board support"
+	default n
+	help
+	  This is support wcn chip for other company board.
+	  if you want to support other company board.
+	  please say "y".
 	  Thanks.
 
 config WCN_BSP_DRIVER_BUILDIN
@@ -62,49 +100,24 @@ config WCN_BSP_DRIVER_BUILDIN
 	  please say "y".
 	  Thanks.
 
-config RK_WIFI_DEVICE_UWE5621
-	bool "rockchip board Support for uwe5621"
+config RK_BOARD
+	bool "rockchip board support"
 	default n
 	help
 	  This is support wcn chip for rockchip board.
 	  if you want to support rockchip board.
 	  please say "y".
 	  Thanks.
-
-config RK_WIFI_DEVICE_UWE5622
-	bool "rockchip board Support for uwe5622"
+	  
+config QCOM_BOARD
+	bool "Qualcomm board support"
 	default n
 	help
-	  This is support wcn chip for rockchip board.
-	  if you want to support rockchip board.
+	  This is support wcn chip for Qualcomm board.
+	  if you want to support Qualcomm board.
 	  please say "y".
 	  Thanks.
-
-config AW_WIFI_DEVICE_UWE5622
-	bool "allwinner board Support for uwe5622"
-	default n
-	help
-	  This is support wcn chip for allwinner board.
-	  if you want to support allwinner board.
-	  please say "y".
-	  Thanks.
-
-config AW_BIND_VERIFY
-	bool "allwinner wcn bind verify"
-	depends on AW_WIFI_DEVICE_UWE5622
-	default n
-	help
-	  This is support wcn bind verify for allwinner board.
-	  if you want to do wcn chip bind verify.
-	  please say "y".
-	  Thanks.
-
-# sprd's boot driver based on SC2342-integ...,etc
-#source "drivers/misc/sprdwcn/boot/Kconfig"
-
-# sprd's gnss driver based on SC2355/2342...,etc
-#source "drivers/misc/sprdwcn/gnss/Kconfig"
-
+	  
 # sprd's SDIO device driver based on SC2355...,etc
 #source "drivers/misc/sprdwcn/sdio/Kconfig"
 
