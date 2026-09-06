@@ -1148,8 +1148,14 @@ static int  mtty_remove(struct platform_device *pdev)
     return 0;
 }
 
+#ifdef CONFIG_AML_BOARD
+#define MTTY_DEV_NAME "mtty"
+#else
+#define MTTY_DEV_NAME "unisoc_mtty"
+#endif
+
 static struct platform_device mtty_pdevice = {
-    .name = "unisoc_mtty",
+    .name = MTTY_DEV_NAME,
 };
 
 static const struct of_device_id mtty_match_table[] = {
@@ -1160,7 +1166,7 @@ static const struct of_device_id mtty_match_table[] = {
 static struct platform_driver mtty_driver = {
     .driver = {
         .owner = THIS_MODULE,
-        .name = "unisoc_mtty",
+        .name = MTTY_DEV_NAME,
         //.of_match_table = mtty_match_table,
     },
     .probe = mtty_probe,
@@ -1189,3 +1195,5 @@ module_exit(mtty_exit);
 
 MODULE_AUTHOR("Unisoc wcn bt");
 MODULE_DESCRIPTION("Unisoc marlin tty driver");
+MODULE_LICENSE("GPL");
+MODULE_SOFTDEP("pre: uwe5621_bsp_sdio");

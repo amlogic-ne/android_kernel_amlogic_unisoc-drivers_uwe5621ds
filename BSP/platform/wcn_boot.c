@@ -52,6 +52,12 @@
 #include "wcn_glb_reg.h"
 #include "wcn_ca_trusty.h"
 
+#ifdef CONFIG_AML_BOARD
+#include <linux/amlogic/aml_gpio_consumer.h>
+extern int wifi_irq_trigger_level(void);
+extern void extern_wifi_set_enable(int is_on);
+#endif
+
 #ifdef MODULE_PARAM_PREFIX
 #undef MODULE_PARAM_PREFIX
 #endif
@@ -70,6 +76,8 @@ static char GNSS_FIRMWARE_PATH[255];
 /* path of cp2 firmware. */
 #ifdef CONFIG_CUSTOMIZE_UNISOC_FW_PATH
 #define UNISOC_FW_PATH_DEFAULT CONFIG_CUSTOMIZE_UNISOC_FW_PATH
+#elif defined(CONFIG_AML_BOARD)
+#define UNISOC_FW_PATH_DEFAULT "/vendor/lib/firmware/"
 #else
 #define UNISOC_FW_PATH_DEFAULT "/vendor/firmware/"
 #endif
@@ -2255,6 +2263,13 @@ static void marlin_send_sdio_config_to_cp_vendor(void)
 	 * 10:use BT_WAKEUP_HOST(pubint) pin as gpio irq
 	 * 11:use WL_WAKEUP_HOST(esmd3) pin as gpio irq
 	 */
+#if defined(CONFIG_AML_BOARD)
+	sdio_cfg.cfg.sdio_irq_type = 3;
+	if (wifi_irq_trigger_level() == GPIO_IRQ_LOW || wifi_irq_trigger_level() == IRQF_TRIGGER_LOW)
+		sdio_cfg.cfg.sdio_irq_trigger_type = 0;
+	else
+		sdio_cfg.cfg.sdio_irq_trigger_type = 3;
+#else
 	sdio_cfg.cfg.sdio_irq_type = sprdwcn_bus_get_irq_type();
 		
 	if (sdio_cfg.cfg.sdio_irq_type == 0)
@@ -2279,6 +2294,7 @@ static void marlin_send_sdio_config_to_cp_vendor(void)
 	//WCN_INFO("sdio_config sdio_irq trigger:[low]\n");
 	//sdio_cfg.cfg.sdio_irq_trigger_type = 3;
 	//WCN_INFO("sdio_config sdio_irq trigger:[high]\n");
+#endif
 
 	/*
 	 * bit[15]: wl_wake_host_en: 0: disable, 1: enable
@@ -2635,6 +2651,12 @@ static int gnss_start_run(void)
 
 static int marlin_reset(int val)
 {
+#ifdef CONFIG_AML_BOARD
+	extern_wifi_set_enable(0);
+	mdelay(RESET_DELAY);
+	extern_wifi_set_enable(1);
+	return 0;
+#else
 	if (marlin_dev->reset <= 0)
 		return 0;
 
@@ -2645,6 +2667,7 @@ static int marlin_reset(int val)
 	}
 
 	return 0;
+#endif
 }
 
 static int chip_reset_release(int val)
@@ -2667,7 +2690,16 @@ static int chip_reset_release(int val)
 
 void marlin_chip_en(bool enable, bool reset)
 {
-
+#if defined(CONFIG_AML_BOARD) && defined(CONFIG_WCN_SDIO)
+	if (reset || enable) {
+		extern_wifi_set_enable(0);
+		msleep(100);
+		extern_wifi_set_enable(1);
+	} else {
+		extern_wifi_set_enable(0);
+	}
+	return;
+#else
 	if (gpio_is_valid(marlin_dev->chip_en)) {
 		if (reset) {
 			gpio_direction_output(marlin_dev->chip_en, 0);
@@ -2689,6 +2721,7 @@ void marlin_chip_en(bool enable, bool reset)
 			WCN_INFO("marlin chip en pull down\n");
 		}
 	}
+#endif
 }
 EXPORT_SYMBOL_GPL(marlin_chip_en);
 
@@ -3103,7 +3136,12 @@ static void set_wifipa_status(enum wcn_sub_sys subsys, int val)
 	chip_reset_release(1);                //chip reset enable
 	marlin_analog_power_enable(true);     //analog 1.2v power on
 	wifipa_enable(1);                     //3.3v power on
-	
+
+#if defined(CONFIG_AML_BOARD) && defined(CONFIG_WCN_SDIO)
+	msleep(30);
+	marlin_chip_en(false, true);
+	msleep(30);
+#endif
 
 	/* do not change the follow content*/
 	if (bus_scan_card() < 0)

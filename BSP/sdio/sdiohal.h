@@ -310,6 +310,7 @@ struct sdiohal_data_t {
 	atomic_t flag_suspending;
 	int gpio_num;
 	unsigned int irq_num;
+	unsigned int irq_trigger_type;
 	atomic_t irq_cnt;
 	unsigned int card_dump_flag;
 	struct sdio_func *sdio_func[SDIOHAL_MAX_FUNCS];

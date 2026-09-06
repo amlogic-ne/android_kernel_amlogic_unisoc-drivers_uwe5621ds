@@ -9,6 +9,7 @@ def uwe5621ds_module(name, kernel_build, deps = None):
         outs = [
             "uwe5621_bsp_sdio.ko",
             "sprdwl_ng.ko",
+            "sprdbt_tty.ko",
         ],
         kernel_build = kernel_build,
     )

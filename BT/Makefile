@@ -1,3 +1,5 @@
+include $(dir $(lastword $(MAKEFILE_LIST)))Kbuild
+
 ifeq ($(COUSTOM_PLATFORM), unisoc)
 KO_MODULE_NAME := sprdbt_tty_ott
 else

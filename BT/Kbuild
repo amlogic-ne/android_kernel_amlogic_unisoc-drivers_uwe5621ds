@@ -29,6 +29,10 @@ endif
 ifeq ($(COUSTOM_PLATFORM), mtk)
 BT_CFLAGS += -DCONFIG_MTK_BOARD
 endif
+
+ifeq ($(COUSTOM_PLATFORM), aml)
+BT_CFLAGS += -DCONFIG_AML_BOARD
+endif
 # ------ coustom platform config end ------
 
 # ------ wcn bt common macro start ------
@@ -40,19 +44,24 @@ endif
 # ------ wcn bt common macro end ------
 
 # ------ wcn common inclue files start ------
-INCLUDE_CFLAGS += -I$(src)/../../wlan_drv/unisocwcn/include/
+INCLUDE_CFLAGS += -I$(srctree)/$(src)/../BSP/include
+INCLUDE_CFLAGS += -I$(src)/../BSP/include/
+INCLUDE_CFLAGS += -I$(srctree)/common_drivers/include
 # ------ wcn common inclue files end ------
 
 ccflags-y +=  -Wno-uninitialized -Wno-implicit-fallthrough
 
 ccflags-y += $(BT_CFLAGS)
 ccflags-y += $(INCLUDE_CFLAGS)
-$(info "wcn wifi ccflags-y: $(ccflags-y)")
+ccflags-y += -DCONFIG_WCN_GKI
+$(info "wcn bt ccflags-y: $(ccflags-y)")
 
 #
 # Final Objects
 #
-ifeq ($(COUSTOM_PLATFORM), unisoc)
+ifeq ($(COUSTOM_PLATFORM), aml)
+KBUILD_EXTRA_SYMBOLS = $(src)/../BSP/Module.symvers
+else ifeq ($(COUSTOM_PLATFORM), unisoc)
 KBUILD_EXTRA_SYMBOLS = $(BSP_MODULES_OUT)/wcn_bsp_ott/Module.symvers
 else
 KBUILD_EXTRA_SYMBOLS = $(BSP_MODULES_OUT)/$(UNISOC_WCN_CHIP_ID)_bsp_$(UNISOC_WCN_HW_TYPE)/Module.symvers

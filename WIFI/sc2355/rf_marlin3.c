@@ -5,6 +5,7 @@
 #include <linux/uaccess.h>
 #include <linux/fs.h>
 #include <linux/file.h>
+#include <linux/firmware.h>
 #include <linux/proc_fs.h>
 #include <linux/slab.h>
 #include <linux/printk.h>
@@ -426,6 +427,7 @@ static int wifi_nvm_buf_operate(char *pBuf, int file_len, void *p_data)
 	return 0;
 }
 
+#ifndef CONFIG_WCN_GKI
 static int wifi_nvm_parse(const char *path, void *p_data)
 {
 	unsigned char *p_buf = NULL;
@@ -477,9 +479,27 @@ static int wifi_nvm_parse(const char *path, void *p_data)
 	pr_info("%s(), parsing ini data result=%d\n", __func__, ret);
 	return ret;
 }
+#else
+static int wifi_nvm_parse_gki(const char *name, void *p_data)
+{
+	const struct firmware *firmware;
+	int ret;
+
+	ret = request_firmware_direct(&firmware, name, NULL);
+	if (ret < 0) {
+		pr_err("%s: %s not found (%d)\n", __func__, name, ret);
+		return ret;
+	}
+
+	ret = wifi_nvm_buf_operate((char *)firmware->data, firmware->size, p_data);
+	release_firmware(firmware);
+	return ret;
+}
+#endif
 
 int get_wifi_config_param(struct wifi_conf_t *p)
 {
+#ifndef CONFIG_WCN_GKI
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
 #ifdef CONFIG_UMW2653
 #define CHIPID_REG 0x4083c208
@@ -540,6 +560,9 @@ int get_wifi_config_param(struct wifi_conf_t *p)
 	else if (chip_id == MARLIN_AC_CHIPID)
 		return wifi_nvm_parse(SYSTEM_WIFI_AC_CONFIG_FILE, (void *)p);
 	return wifi_nvm_parse(SYSTEM_WIFI_CONFIG_FILE, (void *)p);
+#endif
+#else
+	return wifi_nvm_parse_gki("wifi_board_config.ini", (void *)p);
 #endif
 }
 
